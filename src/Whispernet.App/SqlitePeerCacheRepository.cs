@@ -15,20 +15,16 @@ public sealed class SqlitePeerCacheRepository : IPeerCacheRepository
     private readonly string _databasePath;
     private readonly SemaphoreSlim _mutex = new(1, 1);
 
-    public SqlitePeerCacheRepository(string databasePath)
-    {
+    public SqlitePeerCacheRepository(string databasePath){
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         _databasePath = databasePath;
     }
 
-    public async Task InitializeAsync(CancellationToken ct = default)
-    {
+    public async Task InitializeAsync(CancellationToken ct = default){
         await _mutex.WaitAsync(ct).ConfigureAwait(false);
-        try
-        {
+        try{
             string? dir = Path.GetDirectoryName(_databasePath);
-            if (!string.IsNullOrEmpty(dir))
-            {
+            if (!string.IsNullOrEmpty(dir)){
                 Directory.CreateDirectory(dir);
             }
 
@@ -48,17 +44,14 @@ public sealed class SqlitePeerCacheRepository : IPeerCacheRepository
                 ON peer_cache (role DESC, consecutive_failures ASC, last_seen_utc DESC, success_count DESC);
                 """);
         }
-        finally
-        {
+        finally{
             _mutex.Release();
         }
     }
 
-    public async Task<IReadOnlyList<CachedPeerEntry>> LoadCachedPeersAsync(int maxLimit = 100, CancellationToken ct = default)
-    {
+    public async Task<IReadOnlyList<CachedPeerEntry>> LoadCachedPeersAsync(int maxLimit = 100, CancellationToken ct = default){
         await _mutex.WaitAsync(ct).ConfigureAwait(false);
-        try
-        {
+        try{
             using var db = SqliteNativeConnection.Open(_databasePath);
             string sql = $"""
                 SELECT node_id, role, endpoint_ticket, last_seen_utc, last_attempt_utc,
@@ -66,7 +59,6 @@ public sealed class SqlitePeerCacheRepository : IPeerCacheRepository
                 FROM peer_cache
                 ORDER BY
                     CASE WHEN role = {(int)NodeRole.MeetingPoint} THEN 1 ELSE 0 END DESC,
-                    CASE WHEN consecutive_failures = 0 THEN 0 ELSE 1 END ASC,
                     consecutive_failures ASC,
                     last_seen_utc DESC,
                     success_count DESC
@@ -76,21 +68,15 @@ public sealed class SqlitePeerCacheRepository : IPeerCacheRepository
             var entries = new List<CachedPeerEntry>();
             db.ExecuteReader(sql, row =>
             {
-                string nodeId = row[0] ?? string.Empty;
-                if (string.IsNullOrWhiteSpace(nodeId))
-                {
-                    return;
-                }
+				string nodeId = row[0];
+                if (string.IsNullOrWhiteSpace(nodeId)) return;
 
                 NodeRole role = int.TryParse(row[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int r)
-                    ? (NodeRole)r
-                    : NodeRole.Peer;
+                    ? (NodeRole)r : NodeRole.Peer;
 
                 string? ticket = string.IsNullOrEmpty(row[2]) ? null : row[2];
 
-                DateTimeOffset lastSeen = DateTimeOffset.TryParse(row[3], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var ls)
-                    ? ls
-                    : DateTimeOffset.UtcNow;
+                DateTimeOffset lastSeen = DateTimeOffset.TryParse(row[3], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var ls) ? ls : DateTimeOffset.UtcNow;
 
                 DateTimeOffset? lastAttempt = !string.IsNullOrEmpty(row[4])
                     && DateTimeOffset.TryParse(row[4], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var la)
@@ -120,27 +106,19 @@ public sealed class SqlitePeerCacheRepository : IPeerCacheRepository
         }
     }
 
-    public async Task ApplyCacheUpdateAsync(
-        IEnumerable<CachedPeerEntry> upsertedEntries,
-        IEnumerable<NodeId> evictedNodes,
-        CancellationToken ct = default)
-    {
+    public async Task ApplyCacheUpdateAsync( IEnumerable<CachedPeerEntry> upsertedEntries, IEnumerable<NodeId> evictedNodes, CancellationToken ct = default){
         await _mutex.WaitAsync(ct).ConfigureAwait(false);
-        try
-        {
+        try{
             using var db = SqliteNativeConnection.Open(_databasePath);
             db.ExecuteNonQuery("BEGIN TRANSACTION;");
-            try
-            {
-                foreach (NodeId evicted in evictedNodes)
-                {
+            try{
+                foreach (NodeId evicted in evictedNodes){
                     // Les Points de Meeting (role = 1) sont protégés contre toute suppression accidentelle
                     string delSql = $"DELETE FROM peer_cache WHERE node_id = {SqlLiteral(evicted.Value)} AND role != {(int)NodeRole.MeetingPoint};";
                     db.ExecuteNonQuery(delSql);
                 }
 
-                foreach (CachedPeerEntry entry in upsertedEntries)
-                {
+                foreach (CachedPeerEntry entry in upsertedEntries){
                     string upsertSql = $"""
                         INSERT INTO peer_cache (
                             node_id, role, endpoint_ticket, last_seen_utc, last_attempt_utc,
@@ -170,14 +148,12 @@ public sealed class SqlitePeerCacheRepository : IPeerCacheRepository
 
                 db.ExecuteNonQuery("COMMIT;");
             }
-            catch
-            {
+            catch{
                 db.ExecuteNonQuery("ROLLBACK;");
                 throw;
             }
         }
-        finally
-        {
+        finally{
             _mutex.Release();
         }
     }

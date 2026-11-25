@@ -100,12 +100,7 @@ public sealed class IrohEndpointAdapter : IDisposable
     /// 3. En cas d'échec ou d'absence de ticket (et si <paramref name="allowDhtLookup"/> est vrai),
     ///    résout l'adresse actuelle du pair à partir de son <see cref="NodeId"/> seul via Mainline DHT / Pkarr / mDNS.
     /// </summary>
-    public Task<bool> ConnectSmartAsync(
-        NodeId target,
-        string? cachedTicket = null,
-        bool allowDhtLookup = true,
-        CancellationToken ct = default)
-    {
+    public Task<bool> ConnectSmartAsync( NodeId target, string? cachedTicket = null, bool allowDhtLookup = true, CancellationToken ct = default){
         ObjectDisposedException.ThrowIf(_disposed, this);
 
         if (_connections.ContainsKey(target))
@@ -120,19 +115,15 @@ public sealed class IrohEndpointAdapter : IDisposable
         }, ct);
     }
 
-    private unsafe bool ConnectSmartSync(NodeId target, string? cachedTicket, bool allowDhtLookup)
-    {
-        if (!string.IsNullOrWhiteSpace(cachedTicket))
-        {
-            if (TryConnectWithTicket(cachedTicket, out Connection* ticketConn))
-            {
+    private unsafe bool ConnectSmartSync(NodeId target, string? cachedTicket, bool allowDhtLookup) {
+        if (!string.IsNullOrWhiteSpace(cachedTicket)) {
+            if (TryConnectWithTicket(cachedTicket, out Connection* ticketConn)) {
                 _connections[target] = ((IntPtr)ticketConn, new object());
                 return true;
             }
         }
 
-        if (allowDhtLookup && TryConnectByNodeIdViaDht(target, out Connection* dhtConn))
-        {
+        if (allowDhtLookup && TryConnectByNodeIdViaDht(target, out Connection* dhtConn)) {
             _connections[target] = ((IntPtr)dhtConn, new object());
             return true;
         }
@@ -144,50 +135,38 @@ public sealed class IrohEndpointAdapter : IDisposable
     /// Envoie un payload binaire sur un stream QUIC unidirectionnel vers <paramref name="target"/>
     /// (en résolvant automatiquement via Mainline DHT si aucune connexion n'est ouverte).
     /// </summary>
-    public async Task SendUniAsync(
-        NodeId target,
-        byte[] payload,
-        string? cachedTicket = null,
-        bool allowDhtLookup = true,
-        CancellationToken ct = default)
-    {
+    public async Task SendUniAsync( NodeId target, byte[] payload, string? cachedTicket = null,
+			bool allowDhtLookup = true, CancellationToken ct = default){
         bool connected = await ConnectSmartAsync(target, cachedTicket, allowDhtLookup, ct).ConfigureAwait(false);
-        if (!connected || !_connections.TryGetValue(target, out var entry))
-        {
+        if (!connected || !_connections.TryGetValue(target, out var entry)){
             throw new InvalidOperationException($"Impossible de joindre le pair {target} (ticket et résolution Mainline DHT échoués).");
         }
 
         await Task.Run(() => SendUniSync(target, entry, payload), ct).ConfigureAwait(false);
     }
 
-    private unsafe void SendUniSync(NodeId target, (IntPtr ConnPtr, object SendLock) entry, byte[] payload)
-    {
-        lock (entry.SendLock)
-        {
+    private unsafe void SendUniSync(NodeId target, (IntPtr ConnPtr, object SendLock) entry, byte[] payload){
+        lock (entry.SendLock){
             Connection* conn = (Connection*)entry.ConnPtr;
             SendStream* sendStream = iroh.send_stream_default();
             EndpointResult openRes = iroh.connection_open_uni(&conn, &sendStream);
-            if (openRes != EndpointResult.ENDPOINT_RESULT_OK)
-            {
+            if (openRes != EndpointResult.ENDPOINT_RESULT_OK){
                 iroh.send_stream_free(sendStream);
                 _connections.TryRemove(target, out _);
                 throw new InvalidOperationException($"Échec d'ouverture de stream QUIC vers {target}: {openRes}");
             }
 
-            fixed (byte* pPayload = payload)
-            {
+            fixed (byte* pPayload = payload){
                 var slice = new slice_ref_uint8 { ptr = pPayload, len = (nuint)payload.Length };
                 EndpointResult writeRes = iroh.send_stream_write_timeout(&sendStream, slice, 5000);
-                if (writeRes != EndpointResult.ENDPOINT_RESULT_OK)
-                {
+                if (writeRes != EndpointResult.ENDPOINT_RESULT_OK){
                     iroh.send_stream_free(sendStream);
                     throw new InvalidOperationException($"Échec d'écriture sur stream QUIC vers {target}: {writeRes}");
                 }
             }
 
             EndpointResult finishRes = iroh.send_stream_finish(sendStream);
-            if (finishRes != EndpointResult.ENDPOINT_RESULT_OK)
-            {
+            if (finishRes != EndpointResult.ENDPOINT_RESULT_OK){
                 throw new InvalidOperationException($"Échec de finalisation de stream QUIC vers {target}: {finishRes}");
             }
         }
@@ -207,93 +186,75 @@ public sealed class IrohEndpointAdapter : IDisposable
     /// <summary>
     /// Démarre une boucle d'acceptation en arrière-plan pour recevoir les streams QUIC unidirectionnels entrants.
     /// </summary>
-    public void StartAcceptLoop(Action<byte[]> onPayloadReceived, CancellationToken ct = default)
-    {
+    public void StartAcceptLoop(Action<byte[]> onPayloadReceived, CancellationToken ct = default){
         _acceptLoopStarted = true;
-        Thread acceptThread = new(() => AcceptLoopSync(onPayloadReceived, ct))
-        {
+        Thread acceptThread = new(() => AcceptLoopSync(onPayloadReceived, ct)){
             IsBackground = true,
             Name = $"IrohAccept-{SelfId.Value[..Math.Min(8, SelfId.Value.Length)]}"
         };
         acceptThread.Start();
     }
 
-    private unsafe void AcceptLoopSync(Action<byte[]> onPayloadReceived, CancellationToken ct)
-    {
+    private unsafe void AcceptLoopSync(Action<byte[]> onPayloadReceived, CancellationToken ct){
         byte[] alpnBytes = Encoding.UTF8.GetBytes(_alpn);
-        while (!_disposed && !ct.IsCancellationRequested)
-        {
+        while (!_disposed && !ct.IsCancellationRequested){
             Connection* conn = iroh.connection_default();
             EndpointResult res;
-            fixed (byte* pAlpn = alpnBytes)
-            {
+            fixed (byte* pAlpn = alpnBytes){
                 var slice = new slice_ref_uint8 { ptr = pAlpn, len = (nuint)alpnBytes.Length };
                 Endpoint* ep = (Endpoint*)_endpointPtr;
                 res = iroh.endpoint_accept(&ep, slice, &conn);
             }
 
-            if (res == EndpointResult.ENDPOINT_RESULT_INCOMING_ERROR)
-            {
+            if (res == EndpointResult.ENDPOINT_RESULT_INCOMING_ERROR){
                 iroh.connection_free(conn);
                 continue;
             }
 
-            if (res != EndpointResult.ENDPOINT_RESULT_OK)
-            {
+            if (res != EndpointResult.ENDPOINT_RESULT_OK){
                 iroh.connection_free(conn);
                 break;
             }
 
             IntPtr connPtr = (IntPtr)conn;
-            Thread peerThread = new(() => ReadIncomingStreamsSync(connPtr, onPayloadReceived, ct))
-            {
+            Thread peerThread = new(() => ReadIncomingStreamsSync(connPtr, onPayloadReceived, ct)){
                 IsBackground = true
             };
             peerThread.Start();
         }
     }
 
-    private unsafe void ReadIncomingStreamsSync(IntPtr connPtr, Action<byte[]> onPayloadReceived, CancellationToken ct)
-    {
+    private unsafe void ReadIncomingStreamsSync(IntPtr connPtr, Action<byte[]> onPayloadReceived, CancellationToken ct){
         Connection* conn = (Connection*)connPtr;
-        while (!_disposed && !ct.IsCancellationRequested)
-        {
+        while (!_disposed && !ct.IsCancellationRequested){
             RecvStream* recvStream = iroh.recv_stream_default();
-            if (iroh.connection_accept_uni(&conn, &recvStream) != EndpointResult.ENDPOINT_RESULT_OK)
-            {
+            if (iroh.connection_accept_uni(&conn, &recvStream) != EndpointResult.ENDPOINT_RESULT_OK){
                 iroh.recv_stream_free(recvStream);
                 break;
             }
 
             Vec_uint8 buf = iroh.rust_buffer_alloc(0);
-            try
-            {
+            try{
                 if (iroh.recv_stream_read_to_end_timeout(&recvStream, &buf, 256 * 1024, 10000) == EndpointResult.ENDPOINT_RESULT_OK
-                    && buf.len > 0
-                    && buf.ptr != null)
-                {
+                    && buf.len > 0 && buf.ptr != null){
                     byte[] managed = new byte[(int)buf.len];
                     Marshal.Copy((IntPtr)buf.ptr, managed, 0, managed.Length);
                     onPayloadReceived(managed);
                 }
             }
-            finally
-            {
+            finally{
                 iroh.rust_buffer_free(buf);
                 iroh.recv_stream_free(recvStream);
             }
         }
     }
 
-    private unsafe bool TryConnectWithTicket(string ticket, out Connection* conn)
-    {
+    private unsafe bool TryConnectWithTicket(string ticket, out Connection* conn){
         conn = null;
         EndpointAddr addr = iroh.endpoint_addr_default();
         byte[] ticketBytes = Encoding.UTF8.GetBytes(ticket + "\0");
-        fixed (byte* pTicket = ticketBytes)
-        {
-            if (iroh.endpoint_addr_from_string(pTicket, &addr) != AddrResult.ADDR_RESULT_OK)
-            {
+        fixed (byte* pTicket = ticketBytes){
+            if (iroh.endpoint_addr_from_string(pTicket, &addr) != AddrResult.ADDR_RESULT_OK){
                 iroh.endpoint_addr_free(addr);
                 return false;
             }
@@ -302,15 +263,12 @@ public sealed class IrohEndpointAdapter : IDisposable
         return TryConnectWithEndpointAddr(addr, out conn);
     }
 
-    private unsafe bool TryConnectByNodeIdViaDht(NodeId nodeId, out Connection* conn)
-    {
+    private unsafe bool TryConnectByNodeIdViaDht(NodeId nodeId, out Connection* conn){
         conn = null;
         PublicKey pubKey = iroh.public_key_default();
         byte[] idBytes = Encoding.UTF8.GetBytes(nodeId.Value + "\0");
-        fixed (byte* pId = idBytes)
-        {
-            if (iroh.public_key_from_base32(pId, &pubKey) != KeyResult.KEY_RESULT_OK)
-            {
+        fixed (byte* pId = idBytes){
+            if(iroh.public_key_from_base32(pId, &pubKey) != KeyResult.KEY_RESULT_OK){
                 iroh.public_key_free(pubKey);
                 return false;
             }
@@ -321,17 +279,14 @@ public sealed class IrohEndpointAdapter : IDisposable
         return TryConnectWithEndpointAddr(dhtAddr, out conn);
     }
 
-    private unsafe bool TryConnectWithEndpointAddr(EndpointAddr addr, out Connection* conn)
-    {
+    private unsafe bool TryConnectWithEndpointAddr(EndpointAddr addr, out Connection* conn){
         Connection* candidate = iroh.connection_default();
         byte[] alpnBytes = Encoding.UTF8.GetBytes(_alpn);
-        fixed (byte* pAlpn = alpnBytes)
-        {
+        fixed (byte* pAlpn = alpnBytes){
             var slice = new slice_ref_uint8 { ptr = pAlpn, len = (nuint)alpnBytes.Length };
             Endpoint* ep = (Endpoint*)_endpointPtr;
             EndpointResult res = iroh.endpoint_connect(&ep, slice, addr, &candidate);
-            if (res == EndpointResult.ENDPOINT_RESULT_OK)
-            {
+            if (res == EndpointResult.ENDPOINT_RESULT_OK){
                 conn = candidate;
                 return true;
             }
@@ -342,13 +297,10 @@ public sealed class IrohEndpointAdapter : IDisposable
         return false;
     }
 
-    private static unsafe (string Ticket, string EndpointId) ReadSelfIdentity(Endpoint* ep)
-    {
+    private static unsafe (string Ticket, string EndpointId) ReadSelfIdentity(Endpoint* ep){
         EndpointAddr addr = iroh.endpoint_addr_default();
-        try
-        {
-            if (iroh.endpoint_addr(&ep, &addr) != EndpointResult.ENDPOINT_RESULT_OK)
-            {
+        try{
+            if (iroh.endpoint_addr(&ep, &addr) != EndpointResult.ENDPOINT_RESULT_OK){
                 throw new InvalidOperationException("Impossible de lire l'adresse locale de l'endpoint Iroh.");
             }
 
@@ -362,36 +314,23 @@ public sealed class IrohEndpointAdapter : IDisposable
 
             return (ticket, id);
         }
-        finally
-        {
+        finally{
             iroh.endpoint_addr_free(addr);
         }
     }
 
-    public unsafe void Dispose()
-    {
-        if (_disposed)
-        {
-            return;
-        }
+    public unsafe void Dispose(){
+        if (_disposed) return;
         _disposed = true;
 
         foreach (var kvp in _connections)
-        {
             if (_connections.TryRemove(kvp.Key, out var entry))
-            {
                 lock (entry.SendLock)
-                {
                     iroh.connection_close((Connection*)entry.ConnPtr);
-                }
-            }
-        }
 
         // iroh-c-ffi endpoint_accept holds an RwLock read guard on ep.ep while blocking;
         // calling endpoint_close (which awaits ep.ep.write()) would deadlock if AcceptLoop is running.
         if (!_acceptLoopStarted)
-        {
             iroh.endpoint_close((Endpoint*)_endpointPtr);
-        }
     }
 }

@@ -17,6 +17,20 @@ public readonly record struct MsgId(string Value)
 }
 
 /// <summary>
+/// Identifiant cryptographique d'un auteur (SHA-256 hexadécimal de sa clé publique SPKI).
+/// Indépendant du <see cref="NodeId"/> réseau.
+/// </summary>
+public readonly record struct AuthorId(string Value)
+{
+    public bool IsValid =>
+        !string.IsNullOrWhiteSpace(Value) &&
+        Value.Length == 64 &&
+        Value.All(static c => c is (>= '0' and <= '9') or (>= 'a' and <= 'f'));
+
+    public override string ToString() => Value;
+}
+
+/// <summary>
 /// Rôle du nœud dans le réseau P2P (pair standard ou Point de Meeting 24/24 sur Raspberry Pi).
 /// </summary>
 public enum NodeRole

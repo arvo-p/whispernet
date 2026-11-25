@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using Whispernet.App;
 using Whispernet.Core;
@@ -19,8 +20,9 @@ public static class InfrastructureTests
         RunTest("1.3 PeerCache Ordre LRU + Tolérance 5 échecs + Grace Fallback", TestPeerCacheOrderToleranceAndStaleFallback);
         RunTest("1.4 Anti-Îlots (PartitionHealTimer -> fusion de 2 îlots)", TestPartitionHealingAntiIslands);
 
-        // Niveau 2 : Intégration SQLite réelle
+        // Niveau 2 : Intégration SQLite réelle et Comptes chiffrés (.App)
         await RunTestAsync("2.1 SqlitePeerCacheRepository (CRUD + Ordre + Purge)", TestSqlitePeerCacheRepositoryAsync);
+        await RunTestAsync("2.2 AccountService + WhispernetPaths (ECDSA + PBKDF2 + AES-GCM)", TestAccountServiceAsync);
 
         // Niveau 3 : Réseau réel Iroh QUIC + Mainline DHT (par NodeId seul)
         await RunTestAsync("3.1 Iroh QUIC + Discovery All (DirectMeshService 1-to-1)", TestRealIrohMainlineDhtDirectMessagingAsync);
@@ -430,5 +432,96 @@ public static class InfrastructureTests
 
         DirectChatMessage received = await bobReceivedTcs.Task.WaitAsync(TimeSpan.FromSeconds(20), cts.Token);
         Assert(received.Content == "Preuve Mainline DHT pure !", $"Contenu inattendu : {received.Content}");
+    }
+
+    // =========================================================================
+    // NIVEAU 2.2 : Création de compte sécurisée (.App)
+    // =========================================================================
+    private static async Task TestAccountServiceAsync()
+    {
+        // Vérification de la résolution multiplateforme des chemins
+        string defaultDataDir = WhispernetPaths.GetDataDirectory();
+        if (OperatingSystem.IsWindows())
+        {
+            Assert(defaultDataDir.EndsWith("Whispernet", StringComparison.Ordinal),
+                $"Unexpected Windows data path: {defaultDataDir}");
+        }
+        else
+        {
+            Assert(defaultDataDir.EndsWith(Path.Combine(".local", "share", "whispernet"), StringComparison.Ordinal) ||
+                   defaultDataDir.EndsWith("whispernet", StringComparison.Ordinal),
+                $"Unexpected Linux data path: {defaultDataDir}");
+        }
+
+        string tempRoot = Path.Combine(Path.GetTempPath(), $"whispernet_acc_test_{Guid.NewGuid():N}");
+        try
+        {
+            var service = new AccountService(tempRoot);
+
+            // 1. Compte protégé par mot de passe
+            AccountProfile alice = await service.CreateAccountAsync("Alice", "MySuperSecretPassword!2026");
+            Assert(alice.AuthorId.IsValid, "AuthorId must be a valid 64-char hex SHA-256.");
+            Assert(alice.IsPasswordProtected, "Alice account must be marked as password-protected.");
+
+            byte[] pubSpki = Convert.FromBase64String(alice.PublicKeySpkiBase64);
+            string expectedAuthorId = Convert.ToHexStringLower(SHA256.HashData(pubSpki));
+            Assert(alice.AuthorId.Value == expectedAuthorId, "AuthorId must match SHA-256 of SPKI public key.");
+
+            string aliceDir = WhispernetPaths.GetAccountDirectory(alice.AuthorId, tempRoot);
+            Assert(File.Exists(Path.Combine(aliceDir, "profile.json")), "Missing profile.json.");
+            Assert(File.Exists(Path.Combine(aliceDir, "identity.key.enc")), "Missing identity.key.enc.");
+            Assert(File.Exists(Path.Combine(aliceDir, "folder.dek.enc")), "Missing folder.dek.enc.");
+            Assert(!File.Exists(Path.Combine(aliceDir, "identity.key")), "No plaintext key file should exist.");
+
+            // Mauvais mot de passe -> doit lever CryptographicException
+            bool wrongPasswordRejected = false;
+            try
+            {
+                using var _ = await service.UnlockAccountAsync(alice.AuthorId, "WrongPassword");
+            }
+            catch (CryptographicException)
+            {
+                wrongPasswordRejected = true;
+            }
+            Assert(wrongPasswordRejected, "Wrong password must be rejected by AES-GCM.");
+
+            // Bon mot de passe -> déverrouillage, signature et coffre chiffré
+            using (AccountSession session = await service.UnlockAccountAsync(alice.AuthorId, "MySuperSecretPassword!2026"))
+            {
+                Assert(session.IsFolderEncrypted, "Password-protected session must enable folder encryption.");
+                byte[] message = Encoding.UTF8.GetBytes("Message signed by Alice");
+                byte[] sig = service.SignData(session, message);
+                Assert(service.VerifySignature(pubSpki, message, sig), "ECDSA P-256 signature must be valid.");
+
+                byte[] secretNote = Encoding.UTF8.GetBytes("Confidential vault content");
+                await service.WriteVaultFileAsync(session, "notes/secret.txt", secretNote);
+
+                string diskPath = Path.Combine(aliceDir, "vault", "notes", "secret.txt");
+                byte[] diskBytes = await File.ReadAllBytesAsync(diskPath);
+                Assert(!diskBytes.AsSpan().SequenceEqual(secretNote), "Vault file must not be stored in plaintext.");
+
+                byte[] decryptedNote = await service.ReadVaultFileAsync(session, "notes/secret.txt");
+                Assert(decryptedNote.AsSpan().SequenceEqual(secretNote), "Vault decryption must restore exact plaintext.");
+            }
+
+            // 2. Compte sans mot de passe (optionnel)
+            AccountProfile bob = await service.CreateAccountAsync("Bob", password: null);
+            Assert(!bob.IsPasswordProtected, "Bob account without password must have IsPasswordProtected = false.");
+            using (AccountSession bobSession = await service.UnlockAccountAsync(bob.AuthorId))
+            {
+                Assert(!bobSession.IsFolderEncrypted, "Without password, folder encryption is disabled.");
+                byte[] msg = Encoding.UTF8.GetBytes("Hello Bob");
+                byte[] sig = service.SignData(bobSession, msg);
+                Assert(service.VerifySignature(Convert.FromBase64String(bob.PublicKeySpkiBase64), msg, sig),
+                    "Signature without password must be valid.");
+            }
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot))
+            {
+                Directory.Delete(tempRoot, recursive: true);
+            }
+        }
     }
 }

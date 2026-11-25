@@ -770,4 +770,60 @@ Par conséquent, \textbf{la DHT ne transporte jamais les messages du chat} : ell
 
 À chaque expiration du \texttt{PartitionHealTimer} (toutes les 3 minutes), \texttt{ProbeForPartitionHeal} choisit un \emph{Pair Pont} absent de l'îlot courant (un \texttt{MeetingPoint} non connecté ou un pair du cache absent de \texttt{SeenNodesInCurrentEpoch}), le résout via la Mainline DHT et lui envoie un \texttt{JOIN} ou un \texttt{SHUFFLE} : les deux Vues Passives s'échangent et les îlots fusionnent automatiquement.
 
+\section{Couche Applicative (\texttt{Whispernet.App})}
+
+La couche \texttt{Whispernet.App} sépare explicitement l'\textbf{identité réseau} d'un appareil (\texttt{NodeId} Ed25519 géré par Iroh pour le transport QUIC) de l'\textbf{identité d'auteur} de l'utilisateur (\texttt{AuthorId}), tout en assurant la protection cryptographique des comptes locaux et de leurs fichiers.
+
+\subsection{Création de compte et identité d'auteur}
+
+Lors de la création d'un compte via \texttt{IAccountService.CreateAccountAsync(username, password?)}, deux champs sont présentés à l'utilisateur : un \textbf{nom d'utilisateur} (obligatoire, normalisé et borné à 64 caractères sans caractères de contrôle) et un \textbf{mot de passe optionnel}.
+
+\begin{itemize}
+    \item \textbf{Paire de clés asymétriques} : génération d'une paire \textbf{ECDSA sur la courbe NIST P-256} (\texttt{ECDsa.Create(ECCurve.NamedCurves.nistP256)}) via la bibliothèque standard \texttt{.NET 10} (\texttt{System.Security.Cryptography}). La clé publique est exportée au format \textbf{SPKI DER} et la clé privée au format \textbf{PKCS\#8 DER}.
+    \item \textbf{Dérivation de l'\texttt{AuthorId}} : l'identifiant unique et vérifiable de l'auteur est calculé par hachage cryptographique \textbf{SHA-256} de la clé publique SPKI (\texttt{AuthorId = SHA256(PublicKeySpki)} en hexadécimal minuscule sur 64 caractères).
+    \item \textbf{Signature applicative} : une fois le compte déverrouillé (\texttt{AccountSession}), l'auteur signe ses messages et métadonnées avec sa clé privée ECDSA P-256, vérifiable par tout pair disposant de la clé publique SPKI.
+\end{itemize}
+
+\subsection{Sécurisation et chiffrement symétrique}
+
+Lorsque l'utilisateur renseigne un mot de passe, la clé privée et l'ensemble du coffre de fichiers du compte sont chiffrés de manière authentifiée :
+
+\begin{center}
+\begin{tikzpicture}[
+    node distance=0.8cm and 1.2cm,
+    box/.style={rectangle, draw=PrimaryBlue, thick, fill=SoftBg, rounded corners=4pt, minimum width=3.1cm, minimum height=0.85cm, align=center, font=\footnotesize\bfseries},
+    sec/.style={rectangle, draw=AccentTeal, thick, fill=white, rounded corners=4pt, minimum width=3.1cm, minimum height=0.85cm, align=center, font=\footnotesize},
+    arr/.style={-{Stealth[length=2.3mm]}, thick, PrimaryBlue}
+]
+    \node[box] (pwd) {Mot de passe + Sel (16 o)};
+    \node[sec, right=1.3cm of pwd] (kdf) {PBKDF2-HMAC-SHA256\\(600\,000 itérations) $\rightarrow$ \textbf{KEK}};
+    \node[sec, above right=0.5cm and 1.3cm of kdf] (key) {\texttt{identity.key.enc}\\(AES-256-GCM + AAD)};
+    \node[sec, below right=0.5cm and 1.3cm of kdf] (dek) {\texttt{folder.dek.enc}\\(DEK 256 bits enveloppée)};
+    \node[box, right=1.1cm of dek] (vault) {Dossier \texttt{vault/}\\(AES-256-GCM par fichier)};
+
+    \draw[arr] (pwd) -- (kdf);
+    \draw[arr] (kdf) -- (key);
+    \draw[arr] (kdf) -- (dek);
+    \draw[arr] (dek) -- (vault);
+\end{tikzpicture}
+\end{center}
+
+\begin{enumerate}
+    \item \textbf{Dérivation de la clé maître (KEK)} : \texttt{Rfc2898DeriveBytes.Pbkdf2} avec \textbf{HMAC-SHA256}, \textbf{600\,000 itérations} et un sel aléatoire de 16 octets produit une clé maître de 256 bits (\texttt{KEK}). Aucun mot de passe ni condensat n'est stocké sur disque.
+    \item \textbf{Enveloppe KEK / DEK et chiffrement AES-256-GCM} : la clé privée PKCS\#8 (\texttt{identity.key.enc}) et une clé aléatoire dédiée au dossier (\texttt{DEK} dans \texttt{folder.dek.enc}) sont chiffrées par \textbf{AES-256-GCM} (nonce aléatoire 12 octets, tag d'authentification 16 octets et \emph{Associated Data} liant l'\texttt{AuthorId} et l'usage). Un mauvais mot de passe est immédiatement rejeté par l'échec de vérification du tag GCM (\texttt{CryptographicException}).
+    \item \textbf{Chiffrement du dossier du compte (\texttt{vault/})} : chaque fichier écrit via \texttt{WriteVaultFileAsync} est chiffré avec la \texttt{DEK} sous \textbf{AES-256-GCM} avec son chemin relatif en AAD (empêchant toute substitution de fichier) et une protection stricte contre la traversée de chemin (\texttt{..}).
+    \item \textbf{Hygiène mémoire et permissions OS} : tous les tampons sensibles (\texttt{privateKeyPkcs8}, \texttt{KEK}, \texttt{DEK}, octets du mot de passe) sont effacés via \texttt{CryptographicOperations.ZeroMemory} dans des blocs \texttt{finally} et lors de \texttt{AccountSession.Dispose()}. Sous Linux/macOS, les permissions sont restreintes à \texttt{0700} sur les dossiers et \texttt{0600} sur les fichiers.
+    \item \textbf{Mode sans mot de passe} : si le mot de passe est omis, le compte reste utilisable sans invite de déverrouillage (\texttt{IsPasswordProtected = false}), tout en conservant sa paire ECDSA P-256, son \texttt{AuthorId} et les permissions OS restrictives.
+\end{enumerate}
+
+\subsection{Répertoire de données multiplateforme (\texttt{WhispernetPaths})}
+
+Le module \texttt{WhispernetPaths} centralise l'emplacement des données applicatives selon le système d'exploitation :
+\begin{itemize}
+    \item \textbf{Windows} : \texttt{\%APPDATA\%\textbackslash Whispernet} (\texttt{SpecialFolder.ApplicationData}).
+    \item \textbf{Linux} : \texttt{\textasciitilde/.local/share/whispernet} (\texttt{SpecialFolder.LocalApplicationData} ou \texttt{\$HOME/.local/share/whispernet}).
+\end{itemize}
+
+Sous cette racine, l'arborescence regroupe \texttt{accounts/<authorId>/} (\texttt{profile.json}, \texttt{identity.key[.enc]}, \texttt{folder.dek.enc}, \texttt{vault/}) ainsi que la base SQLite \texttt{peer\_cache.db}. Un paramètre optionnel \texttt{rootDirectory} reste injectable pour isoler les tests automatisés.
+
 \end{document}
