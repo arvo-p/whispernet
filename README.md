@@ -1,17 +1,17 @@
-# Whispernet (N0.IrohNet P2P Group Messaging Test App)
+# Whispernet (Application de test de messagerie de groupe P2P avec N0.IrohNet)
 
-A cross-platform peer-to-peer group messaging test application built on [N0.IrohNet](https://www.nuget.org/packages/N0.IrohNet) (.NET bindings for [Iroh](https://iroh.computer/)).
+Une application de test de messagerie de groupe pair-à-pair multiplateforme basée sur [N0.IrohNet](https://www.nuget.org/packages/N0.IrohNet) (bindings .NET pour [Iroh](https://iroh.computer/)).
 
-Because this project references `N0.IrohNet` (`0.101.13`) directly from NuGet.org, it works out of the box on **Windows**, **Linux**, and **macOS** without needing Rust, Cargo, or Clang installed. NuGet automatically downloads the pre-compiled native Iroh library (`iroh_bindgen.dll` on Windows, `libiroh_bindgen.so` on Linux, `libiroh_bindgen.dylib` on macOS).
+Étant donné que ce projet référence `N0.IrohNet` (`0.101.13`) directement depuis NuGet.org, il fonctionne immédiatement sous **Windows**, **Linux** et **macOS** sans avoir besoin d'installer Rust, Cargo ou Clang. NuGet télécharge automatiquement la bibliothèque native Iroh précompilée (`iroh_bindgen.dll` sous Windows, `libiroh_bindgen.so` sous Linux, `libiroh_bindgen.dylib` sous macOS).
 
 ---
 
-## 1. Prerequisites
+## 1. Prérequis
 
-You only need the **.NET 10 SDK** installed on your machine.
+Vous avez uniquement besoin du **SDK .NET 10** installé sur votre machine.
 
 ### Windows
-Install via `winget` in PowerShell / Command Prompt, or download from [dotnet.microsoft.com](https://dotnet.microsoft.com/en-us/download/dotnet/10.0):
+Installez-le via `winget` dans PowerShell / l'Invite de commandes, ou téléchargez-le depuis [dotnet.microsoft.com](https://dotnet.microsoft.com/en-us/download/dotnet/10.0) :
 ```powershell
 winget install Microsoft.DotNet.SDK.10
 ```
@@ -20,37 +20,37 @@ winget install Microsoft.DotNet.SDK.10
 ```bash
 sudo pacman -S dotnet-sdk dotnet-runtime dotnet-targeting-pack
 ```
-*(For Ubuntu/Debian/Fedora, install `dotnet-sdk-10.0` via Microsoft's package feed or the official `dotnet-install.sh` script).*
+*(Pour Ubuntu/Debian/Fedora, installez `dotnet-sdk-10.0` via le dépôt de paquets Microsoft ou le script officiel `dotnet-install.sh`).*
 
-Verify the installation:
+Vérifiez l'installation :
 ```bash
 dotnet --list-sdks
 ```
 
 ---
 
-## 2. Running the Automated 3-Peer Test (`demo`)
+## 2. Lancer le test automatisé à 3 pairs (`demo`)
 
-To verify that `N0.IrohNet` works on your machine, open a terminal in this `Whispernet` folder and run:
+Pour vérifier que `N0.IrohNet` fonctionne sur votre machine, ouvrez un terminal dans ce dossier `Whispernet` et exécutez :
 
 ```bash
 dotnet run -- demo
 ```
 
-This starts three separate Iroh QUIC endpoints in-process (**Alice** as the room host, **Bob** and **Charlie** as group members), connects them via Alice's Iroh endpoint ticket, broadcasts messages across all three peers, verifies delivery, and cleanly disconnects.
+Cela démarre trois points de terminaison (endpoints) Iroh QUIC distincts dans le même processus (**Alice** en tant qu'hôte du salon, **Bob** et **Charlie** en tant que membres du groupe), les connecte via le ticket d'endpoint Iroh d'Alice, diffuse des messages entre les trois pairs, vérifie la réception, puis se déconnecte proprement.
 
 ---
 
-## 3. Interactive Multi-Peer Group Chat (`host` & `join`)
+## 3. Discussion de groupe interactive multi-pairs (`host` & `join`)
 
-You can host a live group chat room on one machine (or terminal) and have collaborators on Windows, Linux, or macOS join it over the network using an Iroh Endpoint Ticket.
+Vous pouvez héberger un salon de discussion de groupe en direct sur une machine (ou un terminal) et permettre à des collaborateurs sous Windows, Linux ou macOS de le rejoindre sur le réseau à l'aide d'un ticket d'endpoint Iroh.
 
-### Step 1: Host a Group Room
-On the host machine, run:
+### Étape 1 : Héberger un salon de groupe
+Sur la machine hôte, exécutez :
 ```bash
 dotnet run -- host Alice
 ```
-Once the endpoint binds and connects to an Iroh relay, it will print an invite command containing a long `endpoint...` ticket string:
+Une fois l'endpoint lié et connecté à un relais Iroh, il affichera une commande d'invitation contenant une longue chaîne de ticket `endpoint...` :
 ```text
 ------------------------------------------------------------
 Endpoint ID : <64-char base32 public key>
@@ -59,19 +59,19 @@ Invite other collaborators to join with this command:
 ------------------------------------------------------------
 ```
 
-### Step 2: Join the Group Room (Windows / Linux / macOS)
-On any collaborator's machine, open a terminal in `Whispernet` and run the command printed by the host (replacing `<TheirName>` with their display name):
+### Étape 2 : Rejoindre le salon de groupe (Windows / Linux / macOS)
+Sur la machine de n'importe quel collaborateur, ouvrez un terminal dans `Whispernet` et exécutez la commande affichée par l'hôte (en remplaçant `<TheirName>` par son nom d'affichage) :
 
 ```powershell
 dotnet run -- join Bob endpointaaqb2lssbuyv...
 ```
 
-### Step 3: Chat
-- Type any message and press **Enter** to broadcast it to everyone in the group.
-- Type `/quit` and press **Enter** to leave the group cleanly.
+### Étape 3 : Discuter
+- Tapez n'importe quel message et appuyez sur **Entrée** pour le diffuser à tous les membres du groupe.
+- Tapez `/quit` et appuyez sur **Entrée** pour quitter le groupe proprement.
 
 ---
 
-## Notes for Windows Collaborators
-- **Only the `Whispernet` folder is required**: You only need `Whispernet.csproj` and `Program.cs` to build and run on Windows.
-- **Windows Defender Firewall**: The first time you run `host` or `join`, Windows Firewall may ask for permission to allow UDP traffic. Click **Allow** so Iroh can establish direct peer-to-peer QUIC connections (otherwise it will route traffic through Iroh's relay servers).
+## Notes pour les collaborateurs sous Windows
+- **Seul le dossier `Whispernet` est nécessaire** : Vous n'avez besoin que de `Whispernet.csproj` et `Program.cs` pour compiler et exécuter le projet sous Windows.
+- **Pare-feu Windows Defender** : La première fois que vous exécutez `host` ou `join`, le pare-feu Windows peut vous demander l'autorisation d'autoriser le trafic UDP. Cliquez sur **Autoriser** afin qu'Iroh puisse établir des connexions QUIC pair-à-pair directes (sinon le trafic passera par les serveurs relais d'Iroh).
