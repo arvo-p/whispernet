@@ -15,4 +15,13 @@
     <ProjectReference Include="..\Whispernet.Core\Whispernet.Core.csproj" />
   </ItemGroup>
 
+  <Target Name="OverrideIrohNativeWithMainlineDht" AfterTargets="Build">
+    <ItemGroup>
+      <CustomIrohNatives Include="..\..\native\runtimes\**" />
+    </ItemGroup>
+    <Copy SourceFiles="@(CustomIrohNatives)"
+          DestinationFiles="@(CustomIrohNatives->'$(OutDir)runtimes\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
 </Project>

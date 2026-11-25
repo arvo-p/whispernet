@@ -12,4 +12,13 @@
     <PackageReference Include="N0.IrohNet" Version="0.101.13" />
   </ItemGroup>
 
+  <Target Name="OverrideIrohNativeWithMainlineDht" AfterTargets="Build">
+    <ItemGroup>
+      <CustomIrohNatives Include="..\native\runtimes\**" />
+    </ItemGroup>
+    <Copy SourceFiles="@(CustomIrohNatives)"
+          DestinationFiles="@(CustomIrohNatives->'$(OutDir)runtimes\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
 </Project>

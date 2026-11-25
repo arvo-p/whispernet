@@ -670,4 +670,104 @@ Pour que le même cœur protocolaire tourne aussi bien sur un poste client (Wind
     \item \textbf{\texttt{Whispernet.MeetingNode}} : un simple exécutable console sans interface graphique (\texttt{OutputType=Exe}), piloté par CLI ou fichier de configuration, très peu gourmand en RAM et facilement supervisé par \texttt{systemd} (\texttt{Restart=always}) sur Raspberry Pi OS / Arch Linux ARM.
 \end{itemize}
 
+\subsubsection{Mécanisme de Peer Caching, ordre de priorité et tolérance aux pannes}
+
+Lorsqu'un client Whispernet redémarre après avoir été fermé, ou lorsqu'il subit une coupure réseau temporaire (veille, changement de Wi-Fi) qui vide sa \emph{Vue Active} et sa \emph{Vue Passive}, il doit pouvoir retrouver le maillage P2P automatiquement sans obliger l'utilisateur à recoller manuellement un ticket d'invitation. C'est le rôle du \textbf{Peer Caching} (implémenté en logique pure dans \texttt{Whispernet.Core/PeerCacheEngine.cs} et persisté dans SQLite via \texttt{Whispernet.App/SqlitePeerCacheRepository.cs}).
+
+\paragraph{1. Dans quel ordre trier la liste du cache ? (Plus anciens en dernier).}
+En pair-à-pair, il faut distinguer deux notions d'« ancienneté » :
+\begin{itemize}
+    \item \textbf{L'âge de dernière présence (\texttt{LastSeenUtc} ancien = vu il y a longtemps)} : un pair qu'on n'a pas vu depuis 4 jours a très probablement éteint sa machine ou changé d'adresse IP. Il doit donc être placé \textbf{en dernier} dans la liste de reconnexion, et être le \textbf{premier évincé} (politique \emph{LRU — Least Recently Used}) lorsque le cache est plein.
+    \item \textbf{La fidélité historique (\texttt{SuccessCount} élevé = « vétéran » vu récemment)} : à l'inverse, un pair vu récemment \emph{et} avec lequel nous avons déjà communiqué avec succès de nombreuses fois est statistiquement bien plus stable qu'un pair inconnu croisé une seule fois.
+\end{itemize}
+
+La liste du cache est donc toujours maintenue et interrogée dans SQLite selon cet \textbf{ordre strict de priorité (du 1\textsuperscript{er} au dernier)} :
+\begin{enumerate}
+    \item \textbf{En 1\textsuperscript{er} — Les Points de Meeting 24/24 (\texttt{NodeRole::MeetingPoint})} : toujours en tête, car ils sont allumés en permanence avec un \texttt{EndpointId} fixe.
+    \item \textbf{En 2\textsuperscript{e} — Les pairs « frais et fidèles » (\texttt{ConsecutiveFailures == 0})} : triés par fraîcheur (\texttt{LastSeenUtc} le plus récent d'abord) puis par fidélité (\texttt{SuccessCount} décroissant).
+    \item \textbf{En 3\textsuperscript{e} — Les pairs en probation (\texttt{0 < ConsecutiveFailures < 5})} : ceux qui ont échoué récemment mais n'ont pas encore atteint le seuil d'éviction, triés du moins d'échecs au plus d'échecs.
+    \item \textbf{En dernier — Les pairs les plus anciens (\texttt{LastSeenUtc} le plus vieux)} : essayés en tout dernier ressort et purgés en premier par LRU.
+\end{enumerate}
+
+\paragraph{2. Tolérance avant d'évincer un pair du cache.}
+Évincer un pair dès le premier échec de connexion serait trop agressif (le pair peut simplement être en train de redémarrer sa box ou de changer de réseau). Chaque entrée \texttt{CachedPeerEntry} maintient donc un compteur d'échecs consécutifs (\texttt{ConsecutiveFailures}) gouverné par les règles suivantes :
+
+\begin{table}[h!]
+\centering
+\small
+\begin{tabular}{@{}llp{7.2cm}@{}}
+\toprule
+\textbf{Paramètre} & \textbf{Valeur par défaut} & \textbf{Comportement exact} \\
+\midrule
+\texttt{MaxConsecutiveFailures} & \texttt{5} échecs consécutifs & Un pair standard (\texttt{Peer}) n'est évincé du cache qu'au bout de 5 tentatives échouées d'affilée. Dès qu'une connexion réussit, \texttt{ConsecutiveFailures} retombe à \texttt{0}. \\
+\texttt{RetryCooldownBase} & \texttt{10 secondes} & Refroidissement exponentiel ($10\text{s}, 20\text{s}, 40\text{s}, 80\text{s}\dots$) entre deux tentatives sur le même pair en échec, pour essayer d'autres candidats entre-temps. \\
+\texttt{PeerCacheMaxAge} (TTL) & \texttt{7 jours} & Durée maximale d'inactivité au-delà de laquelle un pair standard est considéré comme périmé (\emph{stale}). \\
+Immunité \texttt{MeetingPoint} & Toujours active & Les Points de Meeting 24/24 ne sont \textbf{jamais} évincés du cache (même après 10 échecs locaux si l'utilisateur n'a plus de Wi-Fi). \\
+\bottomrule
+\end{tabular}
+\caption{Politique de tolérance et seuils d'éviction du Peer Cache}
+\end{table}
+
+\paragraph{3. Gestion du cas d'un historique 100\,\% périmé (\emph{Grace Fallback}).}
+Que se passe-t-il si un utilisateur part en vacances et rouvre Whispernet après 3 semaines ? Tous les pairs standards de sa base SQLite ont dépassé le TTL de 7 jours (\texttt{PeerCacheMaxAge}).
+\begin{itemize}
+    \item Si on supprimait aveuglément toutes les entrées de plus de 7 jours au démarrage, le client perdrait tous ses anciens contacts avant même d'avoir essayé de les joindre.
+    \item \textbf{Solution (\texttt{AllowStaleFallbackWhenCacheEmpty = true})} : lors de l'hydratation (\texttt{HydrateFromPeerCache}), si \emph{aucun} pair standard frais n'est disponible, le moteur active le mode \textbf{Grace Fallback} : il conserve les meilleurs anciens pairs (triés par \texttt{SuccessCount} puis \texttt{LastSeenUtc}) mais les place en probation à \texttt{ConsecutiveFailures = Max - 1} (soit \textbf{1 seule chance}).
+    \item Lors de la reconnexion (\texttt{InitiateReconnection}), le nœud contacte en priorité les \texttt{MeetingPoint} 24/24 ainsi que ces pairs en sursis : ceux qui répondent retombent immédiatement à \texttt{ConsecutiveFailures = 0} (sauvés), tandis que ceux qui échouent atteignent \texttt{MaxConsecutiveFailures} et sont immédiatement purgés de SQLite. Si absolument aucun pair ni \texttt{MeetingPoint} ne répond, l'action \texttt{OutAction::PeerCacheExhausted} est émise vers l'UI pour inviter l'utilisateur à saisir un nouveau ticket.
+\end{itemize}
+
+\subsubsection{Mainline DHT : Découverte décentralisée et les 3 cas d'usage}
+
+Dans notre pile Iroh personnalisée (compilée avec \texttt{iroh-mainline-address-lookup}), chaque nœud publie périodiquement ses coordonnées signées (paquets \textbf{Pkarr}) sur la \textbf{Mainline DHT BitTorrent (BEP-44)} lorsque \texttt{DiscoveryConfig::All} est activé.
+
+\paragraph{1. À quoi sert exactement la Mainline DHT (et quelles sont ses limites) ?}
+La Mainline DHT joue le rôle d'\textbf{annuaire mondial 100\,\% décentralisé} (sans serveur DNS central). Elle permet à Whispernet de retrouver l'adresse IP, le port UDP et le relais actuels d'un pair \textbf{uniquement à partir de son \texttt{NodeId} (\texttt{EndpointId} Ed25519)}, même si son ancien ticket a expiré ou s'il a changé de réseau.
+
+\begin{attention}{Limites pragmatiques du protocole BEP-44}
+La Mainline DHT impose une taille maximale de \textbf{1\,000 octets} par entrée mutable, un TTL d'environ \textbf{2 heures} (nécessitant une republication périodique) et une latence de résolution Kademlia UDP de \textbf{1 à 5 secondes}.
+Par conséquent, \textbf{la DHT ne transporte jamais les messages du chat} : elle est utilisée uniquement au moment d'établir une connexion (\texttt{IrohEndpointAdapter.ConnectSmartAsync}), puis le flux \textbf{QUIC} reste ouvert en mémoire ($< 10\text{ ms}$ par message).
+\end{attention}
+
+\paragraph{2. Les 3 cas d'usage de la DHT dans Whispernet.}
+
+\begin{enumerate}
+    \item \textbf{Cas 1 — Messagerie 1-to-1 et petits groupes ($\le 10$ membres)} (\texttt{DirectMeshService}) :
+    Pour les conversations privées ou en petit comité, il n'est pas nécessaire d'activer HyParView et Plumtree. Chaque participant enregistre uniquement les \texttt{NodeId} fixes de ses contacts. Au premier message envoyé, \texttt{ConnectSmartAsync} résout l'adresse actuelle du destinataire via la Mainline DHT (si le ticket en cache échoue ou est absent), puis réutilise la connexion QUIC persistante pour tous les messages suivants.
+
+    \item \textbf{Cas 2 — Démarrage de HyParView avec un cache de pairs périmé} (\texttt{InitiateReconnection}) :
+    Si un client revient après une longue absence et que tous les \texttt{EndpointTicket} stockés dans sa table SQLite \texttt{peer\_cache} sont obsolètes (IP ou relais changés), leur \texttt{NodeId} cryptographique reste identique. \texttt{PeerCacheEngine.InitiateReconnection} émet alors \texttt{OutAction::Connect(..., AllowDhtLookup: true)} pour retrouver les pairs en sursis (\emph{Grace Fallback}) ou les Points de Meeting 24/24 directement via la Mainline DHT.
+
+    \item \textbf{Cas 3 — Fusion des partitions réseau (Anti-îlots)} (\texttt{PartitionHealTimer} + \texttt{ProbeForPartitionHeal}) :
+    Si le réseau se scinde temporairement en deux îlots isolés (ex. \textbf{Îlot A} = \{A, B, C\} et \textbf{Îlot B} = \{D, E, F\}), les \texttt{Shuffle} internes ne suffisent plus à les réunir car chaque îlot a sa propre \texttt{ActiveView} pleine.
+\end{enumerate}
+
+\begin{center}
+\begin{tikzpicture}[
+    node distance=1.1cm,
+    peer/.style={circle, draw=PrimaryBlue, thick, fill=SoftBg, minimum size=7mm, font=\small\bfseries},
+    island/.style={draw=BorderGray, dashed, rounded corners=6pt, inner sep=8pt},
+    dht/.style={-{Stealth[length=2.5mm]}, thick, WarmAmber}
+]
+    % Îlot A
+    \node[peer] (A) {A};
+    \node[peer, below left=0.8cm and 0.6cm of A] (B) {B};
+    \node[peer, below right=0.8cm and 0.6cm of A] (C) {C};
+    \draw[thick, PrimaryBlue] (A) -- (B) -- (C) -- (A);
+    \node[island, fit=(A)(B)(C), label=above:{\scriptsize\textbf{Îlot A}}] {};
+
+    % Îlot B
+    \node[peer, right=4.8cm of A] (D) {D};
+    \node[peer, below left=0.8cm and 0.6cm of D] (E) {E};
+    \node[peer, below right=0.8cm and 0.6cm of D] (F) {F};
+    \draw[thick, AccentTeal] (D) -- (E) -- (F) -- (D);
+    \node[island, fit=(D)(E)(F), label=above:{\scriptsize\textbf{Îlot B}}] {};
+
+    % Pont DHT
+    \draw[dht] (C) to[bend right=18] node[below, font=\scriptsize\bfseries, color=WarmAmber] {1. \texttt{ConnectSmartAsync(D, AllowDht=true)}} (E);
+    \draw[dht, dashed] (E) to[bend right=18] node[above, font=\scriptsize, color=PrimaryBlue] {2. \texttt{SHUFFLE} inter-îlots $\rightarrow$ fusion} (C);
+\end{tikzpicture}
+\end{center}
+
+À chaque expiration du \texttt{PartitionHealTimer} (toutes les 3 minutes), \texttt{ProbeForPartitionHeal} choisit un \emph{Pair Pont} absent de l'îlot courant (un \texttt{MeetingPoint} non connecté ou un pair du cache absent de \texttt{SeenNodesInCurrentEpoch}), le résout via la Mainline DHT et lui envoie un \texttt{JOIN} ou un \texttt{SHUFFLE} : les deux Vues Passives s'échangent et les îlots fusionnent automatiquement.
+
 \end{document}

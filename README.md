@@ -19,7 +19,7 @@
 Vous avez uniquement besoin du **SDK .NET 10** installé sur votre machine.
 
 #### Windows
-Installez via `winget` dans PowerShell / l'Invite de commandes, ou téléchargez depuis [dotnet.microsoft.com](https://dotnet.microsoft.com/en-us/download/dotnet/10.0) :
+Utilisez `dotnet` depuis Visual Studio ou installez via `winget` dans PowerShell, ou téléchargez depuis [dotnet.microsoft.com](https://dotnet.microsoft.com/en-us/download/dotnet/10.0) :
 ```powershell
 winget install Microsoft.DotNet.SDK.10
 ```
@@ -37,16 +37,7 @@ dotnet --list-sdks
 
 ### Dépendance `N0.IrohNet` (NuGet)
 Le projet référence directement le package NuGet [`N0.IrohNet` (`0.101.13`)](https://www.nuget.org/packages/N0.IrohNet).
-- Aucune installation de **Rust**, **Cargo** ou **Clang** n'est requise.
 - Lors de `dotnet restore` / `dotnet build`, NuGet télécharge automatiquement la bibliothèque native Iroh précompilée adaptée à votre système (`iroh_bindgen.dll` sous Windows, `libiroh_bindgen.so` sous Linux `x64`/`arm64`, `libiroh_bindgen.dylib` sous macOS).
-
-### LaTeX (optionnel — pour compiler les rapports)
-Si vous modifiez ou souhaitez compiler [`Rapports/Plan_d_implementation_1.0.tex`](Rapports/Plan_d_implementation_1.0.tex) localement :
-```bash
-cd Rapports
-pdflatex Plan_d_implementation_1.0.tex
-pdflatex Plan_d_implementation_1.0.tex
-```
 
 ---
 
