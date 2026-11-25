@@ -21,3 +21,4 @@
 /home/arvo/Documents/Projects/P2P/Whispernet/obj/Debug/net10.0/Whispernet.pdb
 /home/arvo/Documents/Projects/P2P/Whispernet/obj/Debug/net10.0/Whispernet.genruntimeconfig.cache
 /home/arvo/Documents/Projects/P2P/Whispernet/obj/Debug/net10.0/ref/Whispernet.dll
+/home/arvo/Documents/Projects/P2P/Whispernet/obj/Debug/net10.0/Whispernet.sourcelink.json
