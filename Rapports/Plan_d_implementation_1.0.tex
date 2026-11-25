@@ -26,6 +26,44 @@
 \definecolor{CodeBg}{HTML}{F1F5F9}
 \definecolor{BorderGray}{HTML}{CBD5E1}
 
+% Style coloré des sections, sous-sections et sous-sous-sections
+\makeatletter
+\def\@seccntformat#1{%
+  \ifnum\pdfstrcmp{#1}{section}=0
+    \colorbox{PrimaryBlue}{\color{white}\csname the#1\endcsname}\hspace{0.6em}%
+  \else\ifnum\pdfstrcmp{#1}{subsection}=0
+    {\color{AccentTeal}\rule[-1.5pt]{3pt}{11pt}\hspace{0.5em}\thesubsection\hspace{0.5em}}%
+  \else\ifnum\pdfstrcmp{#1}{subsubsection}=0
+    {\color{PrimaryBlue}\thesubsubsection\hspace{0.5em}}%
+  \else
+    \csname the#1\endcsname\quad
+  \fi\fi\fi
+}
+
+\let\orig@section\section
+\renewcommand\orig@section{\@startsection {section}{1}{\z@}%
+                                   {-3.5ex \@plus -1ex \@minus -.2ex}%
+                                   {1.5ex \@plus.2ex}%
+                                   {\normalfont\Large\bfseries\color{PrimaryBlue}}}
+\RenewDocumentCommand{\section}{s o m}{%
+  \IfBooleanTF{#1}{%
+    \orig@section*{#3}%
+  }{%
+    \IfValueTF{#2}{\orig@section[#2]{#3}}{\orig@section{#3}}%
+    \par\nobreak\vspace{-1.0ex}\noindent{\color{AccentTeal}\rule{\linewidth}{1.2pt}}\par\nobreak\vspace{0.8ex}%
+  }%
+}
+
+\renewcommand\subsection{\@startsection{subsection}{2}{\z@}%
+                                     {-3.0ex\@plus -1ex \@minus -.2ex}%
+                                     {1.2ex \@plus .2ex}%
+                                     {\normalfont\large\bfseries\color{PrimaryBlue}}}
+\renewcommand\subsubsection{\@startsection{subsubsection}{3}{\z@}%
+                                     {-2.2ex\@plus -1ex \@minus -.2ex}%
+                                     {0.8ex \@plus .2ex}%
+                                     {\normalfont\normalsize\bfseries\color{AccentTeal}}}
+\makeatother
+
 \hypersetup{
     colorlinks=true,
     linkcolor=PrimaryBlue,
@@ -140,6 +178,41 @@ La solution \texttt{Whispernet.slnx} est découpée en projets C\# distincts (\e
 \caption{Structure complète de la solution \texttt{Whispernet.slnx}}
 \end{table}
 
+\begin{center}
+\begin{tikzpicture}[
+    node distance=0.8cm and 0.9cm,
+    mod/.style={draw=PrimaryBlue, thick, rounded corners=4pt, fill=SoftBg, align=center, inner sep=7pt, font=\small},
+    ui/.style={mod, draw=AccentTeal, fill=AccentTeal!8, minimum width=3.7cm},
+    lib/.style={mod, minimum width=5.2cm},
+    ext/.style={mod, dashed, draw=WarmAmber, fill=WarmAmber!5, minimum width=5.2cm},
+    arr/.style={-{Stealth[length=2.5mm]}, thick, PrimaryBlue}
+]
+    % Couche Hôtes / UI
+    \node[ui] (wpf) {\textbf{Whispernet.Client.Wpf}\\\scriptsize UI Windows (WPF)};
+    \node[ui, right=0.6cm of wpf] (lin) {\textbf{Whispernet.Client.Linux}\\\scriptsize UI Linux};
+    \node[ui, right=0.6cm of lin, draw=PrimaryBlue, fill=PrimaryBlue!8] (meet) {\textbf{Whispernet.MeetingNode}\\\scriptsize CLI Raspberry Pi 24/24};
+
+    % Couche App (sous les deux UI)
+    \coordinate (midui) at ($(wpf.south)!0.5!(lin.south)$);
+    \node[lib, below=0.9cm of midui] (app) {\textbf{Whispernet.App}\\\scriptsize Logique applicative \& ViewModels (sans UI)};
+
+    % Couche Transport
+    \node[lib, below=0.9cm of app, xshift=1.8cm] (trans) {\textbf{Whispernet.Transport.Iroh}\\\scriptsize Adaptateur réseau Iroh QUIC \& Timers};
+
+    % Couche Core & NuGet (bien séparés horizontalement)
+    \node[lib, minimum width=5.0cm, below=1.0cm of trans, xshift=-3.6cm, fill=PrimaryBlue!8] (core) {\textbf{Whispernet.Core}\\\scriptsize Protocole pur Sans-I/O (HyParView + Plumtree)};
+    \node[ext, minimum width=5.0cm, below=1.0cm of trans, xshift=3.6cm] (iroh) {\textbf{N0.IrohNet (NuGet)}\\\scriptsize Bibliothèque native Iroh (QUIC, Relais, NAT)};
+
+    % Flèches de dépendance
+    \draw[arr] (wpf.south) -- (app.north -| wpf.south);
+    \draw[arr] (lin.south) -- (app.north -| lin.south);
+    \draw[arr] (app.south) -- (trans.north -| app.south);
+    \draw[arr] (meet.south) |- (trans.east);
+    \draw[arr] (trans.south) -- (core.north);
+    \draw[arr, dashed, WarmAmber] (trans.south) -- (iroh.north);
+\end{tikzpicture}
+\end{center}
+
 \begin{pedagogie}{Travailler en parallèle sans se marcher sur les pieds}
 Grâce à cette séparation :
 \begin{itemize}
@@ -148,6 +221,59 @@ Grâce à cette séparation :
     \item L'exécutable \textbf{Raspberry Pi (\texttt{MeetingNode})} réutilise directement \texttt{Core} et \texttt{Transport.Iroh} sans embarquer aucune dépendance graphique.
 \end{itemize}
 \end{pedagogie}
+
+\subsection{Gestion GitHub : travailler ensemble sans se bloquer}
+
+Lorsqu'une équipe développe en parallèle sur le même dépôt, le principal risque est de modifier les mêmes fichiers au même moment (ce qui crée des conflits difficiles à résoudre) ou de casser le code qui compile déjà sur \texttt{main}. Grâce au découpage en couches de \texttt{Whispernet.slnx}, ce risque est déjà très faible — à condition de respecter quelques réflexes simples sur GitHub.
+
+\subsubsection*{1. Ne jamais coder directement sur \texttt{main} : une branche par tâche}
+La branche \texttt{main} doit rester \textbf{toujours propre et compilable} : c'est la référence commune de toute l'équipe. En Git, on crée une branche dédiée pour chaque tâche (par exemple \texttt{feat/whispernet-core}) à partir de \texttt{main}, puis on la soumet via une \textbf{Pull Request (PR)} sur GitHub.
+
+\textbf{Exemple concret pas-à-pas pour \texttt{Whispernet.Core} :}
+\begin{lstlisting}
+# 1. Se placer sur main, récupérer la dernière version, puis créer la branche
+git checkout main
+git pull
+git checkout -b feat/whispernet-core
+
+# 2. Modifier uniquement son dossier, commiter et pousser sur GitHub
+git add src/Whispernet.Core/
+git commit -m "Implement HyParView state machine"
+git push -u origin feat/whispernet-core
+\end{lstlisting}
+Sur GitHub, un bandeau \textbf{Compare \& pull request} apparaît alors automatiquement : sélectionnez \texttt{base: main} $\leftarrow$ \texttt{compare: feat/whispernet-core} et cliquez sur \textbf{Create pull request} pour demander une relecture et fusionner proprement.
+
+\emph{Astuce} : si vous devez créer une sous-branche qui dépend d'une branche en cours avant qu'elle soit mergée (par exemple \texttt{feat/hyparview-shuffle} à partir de \texttt{feat/whispernet-core}), placez-vous simplement sur \texttt{feat/whispernet-core} avant de lancer \texttt{git checkout -b feat/hyparview-shuffle}.
+
+\subsubsection*{2. Respecter les frontières des dossiers dans \texttt{src/}}
+Chaque rôle correspond à un projet C\# précis, ce qui évite que deux personnes modifient les mêmes fichiers :
+\begin{itemize}
+    \item \textbf{Équipe P2P} $\rightarrow$ \texttt{src/Whispernet.Core/} et \texttt{src/Whispernet.Transport.Iroh/}
+    \item \textbf{Couche applicative partagée (ViewModels / Contrats)} $\rightarrow$ \texttt{src/Whispernet.App/}
+    \item \textbf{Équipe UI Windows (WPF)} $\rightarrow$ \texttt{src/Whispernet.Client.Wpf/}
+    \item \textbf{Équipe UI Linux} $\rightarrow$ \texttt{src/Whispernet.Client.Linux/}
+    \item \textbf{Équipe Raspberry Pi} $\rightarrow$ \texttt{src/Whispernet.MeetingNode/}
+\end{itemize}
+Tant que chacun reste dans son périmètre, Git saura fusionner vos branches automatiquement sans conflit.
+
+\subsubsection*{3. S'accorder d'abord sur les « contrats » (interfaces publiques)}
+Pour que l'interface graphique et la couche réseau puissent avancer en même temps sans s'attendre l'une l'autre, il faut figer très tôt les \textbf{contrats} entre les couches — c'est-à-dire les interfaces C\# et les types échangés dans \texttt{Whispernet.Core} et \texttt{Whispernet.App} (par exemple \texttt{SendMessage()}, \texttt{OnMessageReceived}, \texttt{OutAction}).
+
+Une fois ces signatures validées et mergées sur \texttt{main}, l'équipe WPF ou Linux peut construire toute son interface (en simulant des messages factices pour tester l'affichage) pendant que l'équipe P2P implémente HyParView et Plumtree en parallèle.
+
+\subsubsection*{4. Mettre sa branche à jour régulièrement (\texttt{git pull --rebase})}
+Plus une branche reste isolée longtemps, plus elle s'éloigne du travail des autres. Prenez l'habitude de récupérer les dernières nouveautés de \texttt{main} avant chaque session de travail et avant d'ouvrir une PR :
+\begin{lstlisting}
+git fetch origin
+git rebase origin/main
+\end{lstlisting}
+Le \texttt{rebase} réapplique vos commits par-dessus le \texttt{main} le plus récent, ce qui garde un historique linéaire et facile à lire. Privilégiez également de \textbf{petites PR fréquentes} (une fonctionnalité = une PR) plutôt que de gros envois en fin de semaine.
+
+\subsubsection*{5. Garder le dépôt propre (éviter les fichiers générés)}
+\begin{itemize}
+    \item \textbf{Ne forcez jamais l'ajout des dossiers \texttt{bin/}, \texttt{obj/}} ni des fichiers temporaires d'éditeur: le fichier \texttt{.gitignore} est là pour les exclure automatiquement, car chaque machine les régénère lors du \texttt{dotnet build}.
+    \item \textbf{Attention aux fichiers partagés} : \texttt{Whispernet.slnx} et les \texttt{.csproj} communs (\texttt{Whispernet.App.csproj}) ne doivent être modifiés que lorsque c'est réellement nécessaire (ajout d'un nouveau projet ou d'une dépendance NuGet).
+\end{itemize}
 
 \newpage
 
