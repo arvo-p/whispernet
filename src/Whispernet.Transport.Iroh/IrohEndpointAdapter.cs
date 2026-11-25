@@ -17,6 +17,7 @@ public sealed class IrohEndpointAdapter : IDisposable
     private readonly string _alpn;
     private readonly ConcurrentDictionary<NodeId, (IntPtr ConnPtr, object SendLock)> _connections = new();
     private volatile bool _disposed;
+    private volatile bool _acceptLoopStarted;
 
     public NodeId SelfId { get; }
     public string SelfTicket { get; }
@@ -201,6 +202,87 @@ public sealed class IrohEndpointAdapter : IDisposable
         }
     }
 
+    /// <summary>
+    /// Démarre une boucle d'acceptation en arrière-plan pour recevoir les streams QUIC unidirectionnels entrants.
+    /// </summary>
+    public void StartAcceptLoop(Action<byte[]> onPayloadReceived, CancellationToken ct = default)
+    {
+        _acceptLoopStarted = true;
+        Thread acceptThread = new(() => AcceptLoopSync(onPayloadReceived, ct))
+        {
+            IsBackground = true,
+            Name = $"IrohAccept-{SelfId.Value[..Math.Min(8, SelfId.Value.Length)]}"
+        };
+        acceptThread.Start();
+    }
+
+    private unsafe void AcceptLoopSync(Action<byte[]> onPayloadReceived, CancellationToken ct)
+    {
+        byte[] alpnBytes = Encoding.UTF8.GetBytes(_alpn);
+        while (!_disposed && !ct.IsCancellationRequested)
+        {
+            Connection* conn = iroh.connection_default();
+            EndpointResult res;
+            fixed (byte* pAlpn = alpnBytes)
+            {
+                var slice = new slice_ref_uint8 { ptr = pAlpn, len = (nuint)alpnBytes.Length };
+                Endpoint* ep = (Endpoint*)_endpointPtr;
+                res = iroh.endpoint_accept(&ep, slice, &conn);
+            }
+
+            if (res == EndpointResult.ENDPOINT_RESULT_INCOMING_ERROR)
+            {
+                iroh.connection_free(conn);
+                continue;
+            }
+
+            if (res != EndpointResult.ENDPOINT_RESULT_OK)
+            {
+                iroh.connection_free(conn);
+                break;
+            }
+
+            IntPtr connPtr = (IntPtr)conn;
+            Thread peerThread = new(() => ReadIncomingStreamsSync(connPtr, onPayloadReceived, ct))
+            {
+                IsBackground = true
+            };
+            peerThread.Start();
+        }
+    }
+
+    private unsafe void ReadIncomingStreamsSync(IntPtr connPtr, Action<byte[]> onPayloadReceived, CancellationToken ct)
+    {
+        Connection* conn = (Connection*)connPtr;
+        while (!_disposed && !ct.IsCancellationRequested)
+        {
+            RecvStream* recvStream = iroh.recv_stream_default();
+            if (iroh.connection_accept_uni(&conn, &recvStream) != EndpointResult.ENDPOINT_RESULT_OK)
+            {
+                iroh.recv_stream_free(recvStream);
+                break;
+            }
+
+            Vec_uint8 buf = iroh.rust_buffer_alloc(0);
+            try
+            {
+                if (iroh.recv_stream_read_to_end_timeout(&recvStream, &buf, 256 * 1024, 10000) == EndpointResult.ENDPOINT_RESULT_OK
+                    && buf.len > 0
+                    && buf.ptr != null)
+                {
+                    byte[] managed = new byte[(int)buf.len];
+                    Marshal.Copy((IntPtr)buf.ptr, managed, 0, managed.Length);
+                    onPayloadReceived(managed);
+                }
+            }
+            finally
+            {
+                iroh.rust_buffer_free(buf);
+                iroh.recv_stream_free(recvStream);
+            }
+        }
+    }
+
     private unsafe bool TryConnectWithTicket(string ticket, out Connection* conn)
     {
         conn = null;
@@ -303,6 +385,11 @@ public sealed class IrohEndpointAdapter : IDisposable
             }
         }
 
-        iroh.endpoint_close((Endpoint*)_endpointPtr);
+        // iroh-c-ffi endpoint_accept holds an RwLock read guard on ep.ep while blocking;
+        // calling endpoint_close (which awaits ep.ep.write()) would deadlock if AcceptLoop is running.
+        if (!_acceptLoopStarted)
+        {
+            iroh.endpoint_close((Endpoint*)_endpointPtr);
+        }
     }
 }

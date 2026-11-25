@@ -12,6 +12,12 @@
     <PackageReference Include="N0.IrohNet" Version="0.101.13" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\src\Whispernet.Core\Whispernet.Core.csproj" />
+    <ProjectReference Include="..\src\Whispernet.Transport.Iroh\Whispernet.Transport.Iroh.csproj" />
+    <ProjectReference Include="..\src\Whispernet.App\Whispernet.App.csproj" />
+  </ItemGroup>
+
   <Target Name="OverrideIrohNativeWithMainlineDht" AfterTargets="Build">
     <ItemGroup>
       <CustomIrohNatives Include="..\native\runtimes\**" />

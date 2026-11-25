@@ -462,6 +462,11 @@ public static class Program
             return 0;
         }
 
+        if (args[0].Equals("test-all", StringComparison.OrdinalIgnoreCase))
+        {
+            return await InfrastructureTests.RunAllAsync();
+        }
+
         string mode = args[0].ToLowerInvariant();
         if (mode == "host")
         {
@@ -491,6 +496,7 @@ public static class Program
     {
         Console.WriteLine("Iroh.NET P2P Group Messaging Test App");
         Console.WriteLine("Usage:");
+        Console.WriteLine("  dotnet run -- test-all                   # Run all unit, SQLite, and real Iroh/DHT tests");
         Console.WriteLine("  dotnet run -- demo                       # Run an automated 3-peer group chat test (Alice, Bob, Charlie)");
         Console.WriteLine("  dotnet run -- host <YourName>            # Host a group chat room and print the invite ticket");
         Console.WriteLine("  dotnet run -- join <YourName> <Ticket>   # Join an existing group chat room using its ticket");
