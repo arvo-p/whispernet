@@ -23,7 +23,8 @@ public static class InfrastructureTests
         await RunTestAsync("2.1 SqlitePeerCacheRepository (CRUD + Ordre + Purge)", TestSqlitePeerCacheRepositoryAsync);
 
         // Niveau 3 : Réseau réel Iroh QUIC + Mainline DHT (par NodeId seul)
-        await RunTestAsync("3.1 Iroh QUIC + Mainline DHT (DirectMeshService 1-to-1)", TestRealIrohMainlineDhtDirectMessagingAsync);
+        await RunTestAsync("3.1 Iroh QUIC + Discovery All (DirectMeshService 1-to-1)", TestRealIrohMainlineDhtDirectMessagingAsync);
+        await RunTestAsync("3.2 Iroh QUIC + Mainline DHT SEULE (sans mDNS ni n0_dns)", TestRealIrohMainlineDhtIsolatedAsync);
 
         Console.WriteLine("\nTOUS LES TESTS ONT RÉUSSI AVEC SUCCÈS !");
         return 0;
@@ -395,5 +396,39 @@ public static class InfrastructureTests
         DirectChatMessage received = await bobReceivedTcs.Task.WaitAsync(TimeSpan.FromSeconds(10), cts.Token);
         Assert(received.Content == "Salut Bob via Mainline DHT !", $"Contenu inattendu : {received.Content}");
         Assert(received.SenderId == aliceTransport.SelfId, "SenderId incorrect.");
+    }
+
+    private static async Task TestRealIrohMainlineDhtIsolatedAsync()
+    {
+        const string alpn = "/whispernet/dht-only-test/1";
+        // (DiscoveryConfig)4 correspond à DiscoveryConfig::MainlineDht dans notre binaire natif :
+        // AUCUN serveur DNS/Pkarr de n0, AUCUN mDNS local -> 100 % BitTorrent Mainline DHT !
+        const N0.IrohNet.DiscoveryConfig mainlineDhtOnly = (N0.IrohNet.DiscoveryConfig)4;
+
+        using var aliceTransport = IrohEndpointAdapter.CreateAndBind(
+            alpn: alpn, enableRelay: true, onlineTimeoutMs: 5000, discoveryConfig: mainlineDhtOnly);
+        using var bobTransport = IrohEndpointAdapter.CreateAndBind(
+            alpn: alpn, enableRelay: true, onlineTimeoutMs: 5000, discoveryConfig: mainlineDhtOnly);
+
+        var aliceDirect = new DirectMeshService(aliceTransport);
+        var bobDirect = new DirectMeshService(bobTransport);
+
+        var bobReceivedTcs = new TaskCompletionSource<DirectChatMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+        bobDirect.MessageReceived += msg => bobReceivedTcs.TrySetResult(msg);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+        bobTransport.StartAcceptLoop(bobDirect.HandleIncomingPayload, cts.Token);
+
+        // Laisser le temps à Bob de publier son paquet Pkarr BEP-44 sur la Mainline DHT
+        await Task.Delay(TimeSpan.FromSeconds(4), cts.Token);
+
+        aliceDirect.RegisterConversation("room-dht-only", new[] { bobTransport.SelfId });
+        var sendResults = await aliceDirect.SendMessageAsync("room-dht-only", "Alice", "Preuve Mainline DHT pure !", cts.Token);
+
+        Assert(sendResults.TryGetValue(bobTransport.SelfId, out bool sentOk) && sentOk,
+            "L'envoi 1-to-1 via Mainline DHT pure (sans mDNS ni n0_dns) a échoué.");
+
+        DirectChatMessage received = await bobReceivedTcs.Task.WaitAsync(TimeSpan.FromSeconds(20), cts.Token);
+        Assert(received.Content == "Preuve Mainline DHT pure !", $"Contenu inattendu : {received.Content}");
     }
 }

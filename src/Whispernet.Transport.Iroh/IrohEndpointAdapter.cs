@@ -31,20 +31,22 @@ public sealed class IrohEndpointAdapter : IDisposable
     }
 
     /// <summary>
-    /// Crée et lie un endpoint Iroh avec <see cref="DiscoveryConfig.DISCOVERY_CONFIG_ALL"/>
-    /// (Mainline DHT + Pkarr/DNS + mDNS) et une clé secrète optionnelle (ex: persistée sur Raspberry Pi).
+    /// Crée et lie un endpoint Iroh avec le mode de découverte choisi (par défaut <see cref="DiscoveryConfig.DISCOVERY_CONFIG_ALL"/> :
+    /// Mainline DHT + Pkarr/DNS + mDNS ; passer <c>(DiscoveryConfig)4</c> pour Mainline DHT seule)
+    /// et une clé secrète optionnelle (ex: persistée sur Raspberry Pi).
     /// </summary>
     public static unsafe IrohEndpointAdapter CreateAndBind(
         string alpn = "/whispernet/1",
         string? secretKeyBase32 = null,
         bool enableRelay = true,
-        int onlineTimeoutMs = 3000)
+        int onlineTimeoutMs = 3000,
+        DiscoveryConfig discoveryConfig = DiscoveryConfig.DISCOVERY_CONFIG_ALL)
     {
         EndpointConfig config = iroh.endpoint_config_default();
         try
         {
             config.relay_mode = enableRelay ? RelayMode.RELAY_MODE_DEFAULT : RelayMode.RELAY_MODE_DISABLED;
-            config.discovery_cfg = DiscoveryConfig.DISCOVERY_CONFIG_ALL;
+            config.discovery_cfg = discoveryConfig;
 
             if (!string.IsNullOrWhiteSpace(secretKeyBase32))
             {
