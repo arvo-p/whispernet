@@ -110,7 +110,48 @@
 \tableofcontents
 \newpage
 
-\section{P2P}
+\section{Introduction}
+
+Bienvenue sur le projet \textbf{Whispernet} ! Whispernet est une application de messagerie de groupe pair-à-pair (P2P) décentralisée et multiplateforme, développée en \textbf{.NET 10} au-dessus de \textbf{N0.IrohNet} (bindings C\# pour la pile réseau QUIC \emph{Iroh}).
+
+L'objectif de ce document est d'offrir à tous les collaborateurs — qu'ils travaillent sur le réseau P2P, l'infrastructure serveur légère ou l'interface graphique — une vision commune et claire de l'architecture du dépôt afin de pouvoir développer en parallèle sans conflits ni duplication de code.
+
+\subsection{Structure du projet et organisation des couches}
+
+La solution \texttt{Whispernet.slnx} est découpée en projets C\# distincts (\emph{1 couche = 1 projet \texttt{.csproj} = 1 namespace racine}), organisés selon une architecture en couches strictement séparées :
+
+\begin{table}[h!]
+\centering
+\small
+\begin{tabular}{@{}llp{6.2cm}@{}}
+\toprule
+\textbf{Projet / Dossier} & \textbf{Type / Cible} & \textbf{Rôle et responsabilités} \\
+\midrule
+\texttt{src/Whispernet.Core} & Library (\texttt{net10.0}) & Couche protocole pure \textbf{Sans-I/O} (HyParView + Plumtree). Zéro dépendance réseau ou UI. \\
+\texttt{src/Whispernet.Transport.Iroh} & Library (\texttt{net10.0}) & Adaptateur réseau Iroh QUIC (\texttt{N0.IrohNet}). Exécute les \texttt{OutAction} de \texttt{Core} et gère les timers. \\
+\texttt{src/Whispernet.App} & Library (\texttt{net10.0}) & Logique applicative partagée et \emph{ViewModels} (salons, historique, commandes), indépendante de l'UI. \\
+\texttt{src/Whispernet.Client.Wpf} & WinExe (\texttt{net10.0-windows}) & Interface graphique \textbf{WPF} pour Windows (100\,\% visuelle, liée à \texttt{Whispernet.App}). \\
+\texttt{src/Whispernet.Client.Linux} & Exe (\texttt{net10.0}) & Interface utilisateur pour Linux (100\,\% visuelle, liée à \texttt{Whispernet.App}). \\
+\texttt{src/Whispernet.MeetingNode} & Exe (\texttt{net10.0}) & Binaire terminal léger 24h/24 pour \textbf{Raspberry Pi / Linux} (utilise \texttt{Core} + \texttt{Transport.Iroh}). \\
+\texttt{Tests/} & Exe (\texttt{net10.0}) & Prototype fonctionnel de test de messagerie de groupe P2P (\texttt{demo}, \texttt{host}, \texttt{join}). \\
+\texttt{Rapports/} & Documentation & Rapports d'architecture et présent \emph{Plan d'implémentation 1.0}. \\
+\bottomrule
+\end{tabular}
+\caption{Structure complète de la solution \texttt{Whispernet.slnx}}
+\end{table}
+
+\begin{pedagogie}{Travailler en parallèle sans se marcher sur les pieds}
+Grâce à cette séparation :
+\begin{itemize}
+    \item Les développeurs \textbf{UI Windows (WPF)} et \textbf{UI Linux} travaillent chacun dans leur projet (\texttt{Client.Wpf} / \texttt{Client.Linux}) en consommant simplement \texttt{Whispernet.App}, sans jamais toucher au code réseau.
+    \item Les développeurs \textbf{P2P / Protocole} implémentent HyParView et Plumtree dans \texttt{Whispernet.Core} de manière 100\,\% testable en mémoire.
+    \item L'exécutable \textbf{Raspberry Pi (\texttt{MeetingNode})} réutilise directement \texttt{Core} et \texttt{Transport.Iroh} sans embarquer aucune dépendance graphique.
+\end{itemize}
+\end{pedagogie}
+
+\newpage
+
+\section{Fonctionnalités peer-to-peer}
 
 % ============================================================================
 % SECTION 1.1 : HYPARVIEW

@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Whispernet.Core/Whispernet.Core.csproj" />
+    <Project Path="src/Whispernet.Transport.Iroh/Whispernet.Transport.Iroh.csproj" />
+    <Project Path="src/Whispernet.App/Whispernet.App.csproj" />
+    <Project Path="src/Whispernet.MeetingNode/Whispernet.MeetingNode.csproj" />
+    <Project Path="src/Whispernet.Client.Linux/Whispernet.Client.Linux.csproj" />
+    <Project Path="src/Whispernet.Client.Wpf/Whispernet.Client.Wpf.csproj" />
+  </Folder>
+  <Folder Name="/Tests/">
+    <Project Path="Tests/Whispernet.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="N0.IrohNet" Version="0.101.13" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Whispernet.Core\Whispernet.Core.csproj" />
+  </ItemGroup>
+
+</Project>
