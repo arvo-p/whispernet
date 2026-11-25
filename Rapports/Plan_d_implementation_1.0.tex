@@ -5,6 +5,7 @@
 \usepackage{lmodern}
 \usepackage[margin=2.2cm,headheight=14pt]{geometry}
 \usepackage{xcolor}
+\usepackage{graphicx}
 \usepackage{amsmath,amssymb}
 \usepackage{booktabs}
 \usepackage{parskip}
@@ -91,23 +92,20 @@
 
 \begin{document}
 
-% Page de titre
+% Page de couverture (cover.png pleine page)
 \begin{titlepage}
-    \centering
-    \vspace*{1.5cm}
-    {\color{AccentTeal}\rule{\linewidth}{1.5pt}}\\[0.6cm]
-    {\Huge\bfseries\color{PrimaryBlue} Plan d'implémentation 1.0}\\[0.4cm]
-    {\Large\color{gray} Protocoles \textbf{HyParView} et \textbf{Plumtree} — Architecture Sans-I/O pour Whispernet}\\[0.5cm]
-    {\color{AccentTeal}\rule{\linewidth}{1.5pt}}\\[1.5cm]
-
-    \begin{pedagogie}{Objectif du document}
-        Ce document constitue le \textbf{Plan d'implémentation 1.0} de la couche de diffusion pair-à-pair de \textbf{Whispernet}. Il sépare clairement les deux protocoles complémentaires — \textbf{HyParView} (gestion de topologie) et \textbf{Plumtree} (diffusion épidémique en arbre) — puis détaille leur couplage selon une architecture \emph{Sans-I/O} déterministe et testable.
-    \end{pedagogie}
-
-    \vfill
-    {\large Projet \textbf{Whispernet} — Ingénierie Systèmes Distribués}\\
-    {\small \today}
+    \thispagestyle{empty}
+    \begin{tikzpicture}[remember picture, overlay]
+        \node[inner sep=0pt] at (current page.center) {
+            \includegraphics[width=\paperwidth,height=\paperheight]{cover.png}
+        };
+    \end{tikzpicture}
+    \null
 \end{titlepage}
+
+\begin{pedagogie}{Objectif du document}
+    Ce document constitue le \textbf{Plan d'implémentation 1.0} de la couche de diffusion pair-à-pair de \textbf{Whispernet}. Il sépare clairement les deux protocoles complémentaires — \textbf{HyParView} (gestion de topologie) et \textbf{Plumtree} (diffusion épidémique en arbre) — puis détaille leur couplage selon une architecture \emph{Sans-I/O} déterministe et testable.
+\end{pedagogie}
 
 \tableofcontents
 \newpage
