@@ -1,1 +1,747 @@
-Console.WriteLine("Whispernet.Client.Linux — Interface utilisateur Linux");
+using System.Security.Cryptography;
+using System.Text;
+using Whispernet.App;
+using Whispernet.Core;
+using Whispernet.Transport.Iroh;
+
+namespace Whispernet.Client.Linux;
+
+internal static class Program
+{
+    private static async Task<int> Main(string[] args)
+    {
+        string? rootDir = ParseRootOption(args);
+        string effectiveRoot = string.IsNullOrWhiteSpace(rootDir)
+            ? WhispernetPaths.GetDataDirectory()
+            : Path.GetFullPath(rootDir);
+
+        var accountService = new AccountService(effectiveRoot);
+
+        if (args.Contains("--tui-demo", StringComparer.OrdinalIgnoreCase))
+        {
+            return await RunTuiDemoAsync(effectiveRoot, accountService).ConfigureAwait(false);
+        }
+
+        bool forceCli = args.Contains("--cli", StringComparer.OrdinalIgnoreCase);
+        bool forceTui = args.Contains("--tui", StringComparer.OrdinalIgnoreCase);
+        if (forceTui || (!forceCli && !Console.IsInputRedirected))
+        {
+            var tui = new NcursesTui(effectiveRoot, accountService);
+            await tui.RunAsync().ConfigureAwait(false);
+            return 0;
+        }
+
+        AccountSession? activeSession = null;
+        SqlitePeerCacheRepository? peerCache = null;
+        IrohEndpointAdapter? transport = null;
+        DirectMeshService? directMesh = null;
+        CancellationTokenSource? meshCts = null;
+
+        Console.WriteLine("Whispernet.App Interactive CLI");
+        Console.WriteLine($"Data root: {effectiveRoot}");
+        Console.WriteLine("Type 'help' for available commands, 'exit' to quit.");
+
+        try
+        {
+            while (true)
+            {
+                string promptPrefix = activeSession is null
+                    ? "whispernet"
+                    : $"whispernet:{activeSession.Profile.Username}@{activeSession.Profile.AuthorId.Value[..8]}";
+                Console.Write($"{promptPrefix}> ");
+
+                string? line = Console.ReadLine();
+                if (line is null)
+                {
+                    break;
+                }
+
+                List<string> tokens = SplitArgs(line);
+                if (tokens.Count == 0)
+                {
+                    continue;
+                }
+
+                string cmd = tokens[0].ToLowerInvariant();
+                if (cmd is "exit" or "quit")
+                {
+                    break;
+                }
+
+                try
+                {
+                    switch (cmd)
+                    {
+                        case "help":
+                            PrintHelp();
+                            break;
+
+                        case "tui":
+                        {
+                            var tui = new NcursesTui(effectiveRoot, accountService);
+                            await tui.RunAsync().ConfigureAwait(false);
+                            break;
+                        }
+
+                        case "paths":
+                            Console.WriteLine($"Default OS root : {WhispernetPaths.GetDataDirectory()}");
+                            Console.WriteLine($"Active root     : {effectiveRoot}");
+                            Console.WriteLine($"Accounts dir    : {WhispernetPaths.GetAccountsDirectory(effectiveRoot)}");
+                            Console.WriteLine($"PeerCache DB    : {WhispernetPaths.GetPeerCacheDbPath(effectiveRoot)}");
+                            break;
+
+                        case "account":
+                            activeSession = await HandleAccountCommandAsync(
+                                tokens, accountService, activeSession).ConfigureAwait(false);
+                            break;
+
+                        case "vault":
+                            await HandleVaultCommandAsync(
+                                tokens, accountService, activeSession).ConfigureAwait(false);
+                            break;
+
+                        case "cache":
+                            peerCache = await HandleCacheCommandAsync(
+                                tokens, effectiveRoot, peerCache).ConfigureAwait(false);
+                            break;
+
+                        case "mesh":
+                            (transport, directMesh, meshCts) = await HandleMeshCommandAsync(
+                                tokens, activeSession, peerCache, transport, directMesh, meshCts).ConfigureAwait(false);
+                            break;
+
+                        default:
+                            Console.WriteLine($"Unknown command '{tokens[0]}'. Type 'help' for usage.");
+                            break;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[ERROR] {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+        }
+        finally
+        {
+            activeSession?.Dispose();
+            StopMesh(ref transport, ref directMesh, ref meshCts);
+        }
+
+        return 0;
+    }
+
+    private static async Task<AccountSession?> HandleAccountCommandAsync(
+        List<string> tokens,
+        IAccountService accountService,
+        AccountSession? activeSession)
+    {
+        if (tokens.Count < 2)
+        {
+            Console.WriteLine("Usage: account <create|list|unlock|lock|status|sign|verify> ...");
+            return activeSession;
+        }
+
+        string sub = tokens[1].ToLowerInvariant();
+        switch (sub)
+        {
+            case "create":
+            {
+                if (tokens.Count < 3)
+                {
+                    Console.WriteLine("Usage: account create <username> [--no-password]");
+                    return activeSession;
+                }
+
+                string username = tokens[2];
+                bool noPassword = tokens.Any(t => t.Equals("--no-password", StringComparison.OrdinalIgnoreCase));
+                string? password = noPassword ? null : ReadPassword("Optional password (leave empty for none): ");
+                if (string.IsNullOrEmpty(password))
+                {
+                    password = null;
+                }
+
+                AccountProfile profile = await accountService.CreateAccountAsync(username, password).ConfigureAwait(false);
+                Console.WriteLine("Account created:");
+                Console.WriteLine($"  Username          : {profile.Username}");
+                Console.WriteLine($"  AuthorId          : {profile.AuthorId}");
+                Console.WriteLine($"  PasswordProtected : {profile.IsPasswordProtected}");
+                Console.WriteLine($"  PublicKey (SPKI)  : {profile.PublicKeySpkiBase64}");
+                return activeSession;
+            }
+
+            case "list":
+            {
+                IReadOnlyList<AccountProfile> accounts = await accountService.ListAccountsAsync().ConfigureAwait(false);
+                if (accounts.Count == 0)
+                {
+                    Console.WriteLine("No local accounts found.");
+                    return activeSession;
+                }
+
+                foreach (AccountProfile acc in accounts)
+                {
+                    string marker = activeSession?.Profile.AuthorId == acc.AuthorId ? "*" : " ";
+                    Console.WriteLine($"{marker} {acc.AuthorId} | {acc.Username} | protected={acc.IsPasswordProtected} | created={acc.CreatedAtUtc:O}");
+                }
+                return activeSession;
+            }
+
+            case "unlock":
+            {
+                if (tokens.Count < 3)
+                {
+                    Console.WriteLine("Usage: account unlock <username|authorId>");
+                    return activeSession;
+                }
+
+                string query = tokens[2];
+                IReadOnlyList<AccountProfile> accounts = await accountService.ListAccountsAsync().ConfigureAwait(false);
+
+                List<AccountProfile> matches = accounts
+                    .Where(a =>
+                        a.AuthorId.Value.Equals(query, StringComparison.Ordinal) ||
+                        a.Username.Equals(query, StringComparison.Ordinal))
+                    .ToList();
+
+                if (matches.Count == 0)
+                {
+                    Console.WriteLine($"No local account found matching '{query}'.");
+                    return activeSession;
+                }
+
+                if (matches.Count > 1)
+                {
+                    Console.WriteLine($"Multiple accounts match '{query}'. Please specify the exact AuthorId:");
+                    foreach (AccountProfile m in matches)
+                    {
+                        Console.WriteLine($"  {m.AuthorId} | {m.Username} | protected={m.IsPasswordProtected} | created={m.CreatedAtUtc:O}");
+                    }
+                    return activeSession;
+                }
+
+                AccountProfile target = matches[0];
+                string? password = target.IsPasswordProtected
+                    ? ReadPassword("Password: ")
+                    : null;
+
+                AccountSession newSession = await accountService.UnlockAccountAsync(target.AuthorId, password).ConfigureAwait(false);
+                activeSession?.Dispose();
+                Console.WriteLine($"Unlocked account '{newSession.Profile.Username}' ({newSession.Profile.AuthorId}).");
+                Console.WriteLine($"  Folder encrypted: {newSession.IsFolderEncrypted}");
+                return newSession;
+            }
+
+            case "lock":
+            {
+                if (activeSession is null)
+                {
+                    Console.WriteLine("No active account session.");
+                    return null;
+                }
+
+                activeSession.Dispose();
+                Console.WriteLine("Account session locked and zeroed.");
+                return null;
+            }
+
+            case "status":
+            {
+                if (activeSession is null)
+                {
+                    Console.WriteLine("Status: locked (no active session).");
+                }
+                else
+                {
+                    Console.WriteLine($"Status          : unlocked");
+                    Console.WriteLine($"Username        : {activeSession.Profile.Username}");
+                    Console.WriteLine($"AuthorId        : {activeSession.Profile.AuthorId}");
+                    Console.WriteLine($"FolderEncrypted : {activeSession.IsFolderEncrypted}");
+                    Console.WriteLine($"Directory       : {activeSession.AccountDirectory}");
+                }
+                return activeSession;
+            }
+
+            case "sign":
+            {
+                if (activeSession is null)
+                {
+                    Console.WriteLine("Unlock an account first ('account unlock <authorId>').");
+                    return activeSession;
+                }
+
+                if (tokens.Count < 3)
+                {
+                    Console.WriteLine("Usage: account sign <text>");
+                    return activeSession;
+                }
+
+                string text = string.Join(' ', tokens.Skip(2));
+                byte[] sig = accountService.SignData(activeSession, Encoding.UTF8.GetBytes(text));
+                Console.WriteLine($"Signature (Base64): {Convert.ToBase64String(sig)}");
+                return activeSession;
+            }
+
+            case "verify":
+            {
+                if (tokens.Count < 5)
+                {
+                    Console.WriteLine("Usage: account verify <authorId|pubKeyBase64> <sigBase64> <text>");
+                    return activeSession;
+                }
+
+                string keyOrAuthor = tokens[2];
+                byte[] sig = Convert.FromBase64String(tokens[3]);
+                string text = string.Join(' ', tokens.Skip(4));
+
+                byte[] pubKeySpki;
+                var maybeAuthorId = new AuthorId(keyOrAuthor);
+                if (maybeAuthorId.IsValid)
+                {
+                    IReadOnlyList<AccountProfile> accounts = await accountService.ListAccountsAsync().ConfigureAwait(false);
+                    AccountProfile? acc = accounts.FirstOrDefault(a => a.AuthorId == maybeAuthorId);
+                    if (acc is null)
+                    {
+                        Console.WriteLine($"No local account found for AuthorId {maybeAuthorId}.");
+                        return activeSession;
+                    }
+                    pubKeySpki = Convert.FromBase64String(acc.PublicKeySpkiBase64);
+                }
+                else
+                {
+                    pubKeySpki = Convert.FromBase64String(keyOrAuthor);
+                }
+
+                bool valid = accountService.VerifySignature(pubKeySpki, Encoding.UTF8.GetBytes(text), sig);
+                Console.WriteLine($"Signature valid: {valid}");
+                return activeSession;
+            }
+
+            default:
+                Console.WriteLine($"Unknown account subcommand '{sub}'.");
+                return activeSession;
+        }
+    }
+
+    private static async Task HandleVaultCommandAsync(
+        List<string> tokens,
+        IAccountService accountService,
+        AccountSession? activeSession)
+    {
+        if (activeSession is null)
+        {
+            Console.WriteLine("Unlock an account first ('account unlock <authorId>').");
+            return;
+        }
+
+        if (tokens.Count < 2)
+        {
+            Console.WriteLine("Usage: vault <write|read|list> ...");
+            return;
+        }
+
+        string sub = tokens[1].ToLowerInvariant();
+        switch (sub)
+        {
+            case "write":
+            {
+                if (tokens.Count < 4)
+                {
+                    Console.WriteLine("Usage: vault write <relativePath> <text>");
+                    return;
+                }
+
+                string relPath = tokens[2];
+                string content = string.Join(' ', tokens.Skip(3));
+                await accountService.WriteVaultFileAsync(
+                    activeSession,
+                    relPath,
+                    Encoding.UTF8.GetBytes(content)).ConfigureAwait(false);
+                Console.WriteLine($"Saved '{relPath}' (encrypted={activeSession.IsFolderEncrypted}).");
+                break;
+            }
+
+            case "read":
+            {
+                if (tokens.Count < 3)
+                {
+                    Console.WriteLine("Usage: vault read <relativePath>");
+                    return;
+                }
+
+                string relPath = tokens[2];
+                byte[] data = await accountService.ReadVaultFileAsync(activeSession, relPath).ConfigureAwait(false);
+                Console.WriteLine(Encoding.UTF8.GetString(data));
+                break;
+            }
+
+            case "list":
+            {
+                string vaultDir = Path.Combine(activeSession.AccountDirectory, "vault");
+                if (!Directory.Exists(vaultDir))
+                {
+                    Console.WriteLine("Vault directory is empty.");
+                    return;
+                }
+
+                string[] files = Directory.GetFiles(vaultDir, "*", SearchOption.AllDirectories);
+                if (files.Length == 0)
+                {
+                    Console.WriteLine("Vault directory is empty.");
+                    return;
+                }
+
+                foreach (string file in files)
+                {
+                    Console.WriteLine($"  {Path.GetRelativePath(vaultDir, file).Replace('\\', '/')}");
+                }
+                break;
+            }
+
+            default:
+                Console.WriteLine($"Unknown vault subcommand '{sub}'.");
+                break;
+        }
+    }
+
+    private static async Task<SqlitePeerCacheRepository?> HandleCacheCommandAsync(
+        List<string> tokens,
+        string effectiveRoot,
+        SqlitePeerCacheRepository? peerCache)
+    {
+        if (tokens.Count < 2)
+        {
+            Console.WriteLine("Usage: cache <init|list|upsert|prune>");
+            return peerCache;
+        }
+
+        string sub = tokens[1].ToLowerInvariant();
+        if (sub == "init" || peerCache is null)
+        {
+            Directory.CreateDirectory(effectiveRoot);
+            string dbPath = WhispernetPaths.GetPeerCacheDbPath(effectiveRoot);
+            peerCache = new SqlitePeerCacheRepository(dbPath);
+            await peerCache.InitializeAsync().ConfigureAwait(false);
+            if (sub == "init")
+            {
+                Console.WriteLine($"PeerCache initialized at {dbPath}");
+                return peerCache;
+            }
+        }
+
+        switch (sub)
+        {
+            case "list":
+            {
+                int limit = tokens.Count >= 3 && int.TryParse(tokens[2], out int parsed) ? parsed : 50;
+                IReadOnlyList<CachedPeerEntry> entries = await peerCache.LoadCachedPeersAsync(limit).ConfigureAwait(false);
+                if (entries.Count == 0)
+                {
+                    Console.WriteLine("PeerCache is empty.");
+                    return peerCache;
+                }
+
+                foreach (CachedPeerEntry e in entries)
+                {
+                    Console.WriteLine($"  {e.NodeId} | role={e.Role} | ok={e.SuccessCount} | fail={e.ConsecutiveFailures} | seen={e.LastSeenUtc:O}");
+                }
+                return peerCache;
+            }
+
+            case "upsert":
+            {
+                if (tokens.Count < 3)
+                {
+                    Console.WriteLine("Usage: cache upsert <nodeId> [Peer|MeetingPoint] [ticket]");
+                    return peerCache;
+                }
+
+                var nodeId = new NodeId(tokens[2]);
+                NodeRole role = tokens.Count >= 4 && Enum.TryParse(tokens[3], ignoreCase: true, out NodeRole parsedRole)
+                    ? parsedRole
+                    : NodeRole.Peer;
+                string? ticket = tokens.Count >= 5 ? tokens[4] : null;
+
+                var entry = new CachedPeerEntry(nodeId, role, ticket, DateTimeOffset.UtcNow, SuccessCount: 1);
+                await peerCache.ApplyCacheUpdateAsync(new[] { entry }, Array.Empty<NodeId>()).ConfigureAwait(false);
+                Console.WriteLine($"Upserted peer {nodeId} (role={role}).");
+                return peerCache;
+            }
+
+            case "prune":
+            {
+                int days = tokens.Count >= 3 && int.TryParse(tokens[2], out int d) ? d : 7;
+                int maxFail = tokens.Count >= 4 && int.TryParse(tokens[3], out int f) ? f : 5;
+                int pruned = await peerCache.PruneExpiredAndFailedPeersAsync(
+                    DateTimeOffset.UtcNow, TimeSpan.FromDays(days), maxFail).ConfigureAwait(false);
+                Console.WriteLine($"Pruned {pruned} peer(s).");
+                return peerCache;
+            }
+
+            default:
+                Console.WriteLine($"Unknown cache subcommand '{sub}'.");
+                return peerCache;
+        }
+    }
+
+    private static async Task<(IrohEndpointAdapter? Transport, DirectMeshService? Mesh, CancellationTokenSource? Cts)> HandleMeshCommandAsync(
+        List<string> tokens,
+        AccountSession? activeSession,
+        SqlitePeerCacheRepository? peerCache,
+        IrohEndpointAdapter? transport,
+        DirectMeshService? directMesh,
+        CancellationTokenSource? meshCts)
+    {
+        if (tokens.Count < 2)
+        {
+            Console.WriteLine("Usage: mesh <start|info|conv|send|stop>");
+            return (transport, directMesh, meshCts);
+        }
+
+        string sub = tokens[1].ToLowerInvariant();
+        switch (sub)
+        {
+            case "start":
+            {
+                if (transport is not null)
+                {
+                    Console.WriteLine($"Mesh already running (SelfId={transport.SelfId}).");
+                    return (transport, directMesh, meshCts);
+                }
+
+                string alpn = tokens.Count >= 3 ? tokens[2] : "/whispernet/direct/1";
+                transport = IrohEndpointAdapter.CreateAndBind(alpn: alpn, enableRelay: true, onlineTimeoutMs: 3000);
+                directMesh = new DirectMeshService(transport, peerCache);
+                directMesh.MessageReceived += msg =>
+                {
+                    Console.WriteLine();
+                    Console.WriteLine($"[INCOMING] [{msg.ConversationId}] {msg.SenderName} ({msg.SenderId}): {msg.Content}");
+                };
+
+                meshCts = new CancellationTokenSource();
+                transport.StartAcceptLoop(directMesh.HandleIncomingPayload, meshCts.Token);
+
+                Console.WriteLine("Mesh started:");
+                Console.WriteLine($"  SelfId : {transport.SelfId}");
+                Console.WriteLine($"  Ticket : {transport.SelfTicket}");
+                return (transport, directMesh, meshCts);
+            }
+
+            case "info":
+            {
+                if (transport is null)
+                {
+                    Console.WriteLine("Mesh is not running. Use 'mesh start' first.");
+                    return (transport, directMesh, meshCts);
+                }
+
+                Console.WriteLine($"SelfId : {transport.SelfId}");
+                Console.WriteLine($"Ticket : {transport.SelfTicket}");
+                return (transport, directMesh, meshCts);
+            }
+
+            case "conv":
+            {
+                if (directMesh is null)
+                {
+                    Console.WriteLine("Mesh is not running. Use 'mesh start' first.");
+                    return (transport, directMesh, meshCts);
+                }
+
+                if (tokens.Count < 4)
+                {
+                    Console.WriteLine("Usage: mesh conv <conversationId> <nodeId1> [nodeId2 ...]");
+                    return (transport, directMesh, meshCts);
+                }
+
+                string convId = tokens[2];
+                IEnumerable<NodeId> members = tokens.Skip(3).Select(id => new NodeId(id));
+                directMesh.RegisterConversation(convId, members);
+                Console.WriteLine($"Conversation '{convId}' registered.");
+                return (transport, directMesh, meshCts);
+            }
+
+            case "send":
+            {
+                if (directMesh is null)
+                {
+                    Console.WriteLine("Mesh is not running. Use 'mesh start' first.");
+                    return (transport, directMesh, meshCts);
+                }
+
+                if (tokens.Count < 4)
+                {
+                    Console.WriteLine("Usage: mesh send <conversationId> <text>");
+                    return (transport, directMesh, meshCts);
+                }
+
+                string convId = tokens[2];
+                string text = string.Join(' ', tokens.Skip(3));
+                string senderName = activeSession?.Profile.Username ?? "Anonymous";
+                IReadOnlyDictionary<NodeId, bool> results = await directMesh.SendMessageAsync(
+                    convId, senderName, text).ConfigureAwait(false);
+
+                foreach (KeyValuePair<NodeId, bool> kv in results)
+                {
+                    Console.WriteLine($"  -> {kv.Key}: {(kv.Value ? "OK" : "FAILED")}");
+                }
+                return (transport, directMesh, meshCts);
+            }
+
+            case "stop":
+            {
+                StopMesh(ref transport, ref directMesh, ref meshCts);
+                Console.WriteLine("Mesh stopped.");
+                return (null, null, null);
+            }
+
+            default:
+                Console.WriteLine($"Unknown mesh subcommand '{sub}'.");
+                return (transport, directMesh, meshCts);
+        }
+    }
+
+    private static void StopMesh(
+        ref IrohEndpointAdapter? transport,
+        ref DirectMeshService? directMesh,
+        ref CancellationTokenSource? meshCts)
+    {
+        meshCts?.Cancel();
+        meshCts?.Dispose();
+        meshCts = null;
+        directMesh = null;
+        transport?.Dispose();
+        transport = null;
+    }
+
+    private static string? ParseRootOption(string[] args)
+    {
+        for (int i = 0; i < args.Length - 1; i++)
+        {
+            if (args[i] == "--root")
+            {
+                return args[i + 1];
+            }
+        }
+        return null;
+    }
+
+    private static string ReadPassword(string prompt)
+    {
+        Console.Write(prompt);
+        if (Console.IsInputRedirected)
+        {
+            return Console.ReadLine() ?? string.Empty;
+        }
+
+        var sb = new StringBuilder();
+        while (true)
+        {
+            ConsoleKeyInfo key = Console.ReadKey(intercept: true);
+            if (key.Key == ConsoleKey.Enter)
+            {
+                Console.WriteLine();
+                return sb.ToString();
+            }
+
+            if (key.Key == ConsoleKey.Backspace)
+            {
+                if (sb.Length > 0)
+                {
+                    sb.Length--;
+                    Console.Write("\b \b");
+                }
+            }
+            else if (!char.IsControl(key.KeyChar))
+            {
+                sb.Append(key.KeyChar);
+                Console.Write('*');
+            }
+        }
+    }
+
+    internal static List<string> SplitArgs(string input)
+    {
+        var result = new List<string>();
+        var current = new StringBuilder();
+        bool inQuotes = false;
+
+        foreach (char c in input)
+        {
+            if (c == '"')
+            {
+                inQuotes = !inQuotes;
+            }
+            else if (char.IsWhiteSpace(c) && !inQuotes)
+            {
+                if (current.Length > 0)
+                {
+                    result.Add(current.ToString());
+                    current.Clear();
+                }
+            }
+            else
+            {
+                current.Append(c);
+            }
+        }
+
+        if (current.Length > 0)
+        {
+            result.Add(current.ToString());
+        }
+
+        return result;
+    }
+
+    private static async Task<int> RunTuiDemoAsync(string effectiveRoot, IAccountService accountService)
+    {
+        var tui = new NcursesTui(effectiveRoot, accountService);
+        await tui.ProcessInputLineAsync("/account create Alice --no-password").ConfigureAwait(false);
+        await tui.ProcessInputLineAsync("/account unlock Alice").ConfigureAwait(false);
+        await tui.ProcessInputLineAsync("/group use dev-room \"Whispernet Core Team\"").ConfigureAwait(false);
+
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        tui.RecordPeerSeen(new NodeId("mp_raspi_node_01"), NodeRole.MeetingPoint, now.AddMinutes(-2));
+        tui.RecordPeerSeen(new NodeId("peer_bob_fresh99"), NodeRole.Peer, now.AddMinutes(-8));
+        tui.RecordPeerSeen(new NodeId("peer_old_stale42"), NodeRole.Peer, now.AddMinutes(-25)); // > 15 min -> excluded
+
+        await tui.ProcessInputLineAsync("Hello team! Testing the ncurses interface.").ConfigureAwait(false);
+
+        Console.WriteLine("=== FRAME 1: GROUP CHAT & ACTIVE PEERS (<15m) ===");
+        Console.WriteLine(tui.RenderFrame(100, 20));
+
+        await tui.ProcessInputLineAsync("/filter AUTH").ConfigureAwait(false);
+        Console.WriteLine("\n=== FRAME 2: TRANSACTION LOGS (FILTERED BY THEME: AUTH) ===");
+        Console.WriteLine(tui.RenderFrame(100, 20));
+        return 0;
+    }
+
+    private static void PrintHelp()
+    {
+        Console.WriteLine("""
+            Commands:
+              tui
+              paths
+              account create <username> [--no-password]
+              account list
+              account unlock <username|authorId>
+              account lock
+              account status
+              account sign <text>
+              account verify <authorId|pubKeyBase64> <sigBase64> <text>
+              vault write <relativePath> <text>
+              vault read <relativePath>
+              vault list
+              cache init
+              cache list [limit]
+              cache upsert <nodeId> [Peer|MeetingPoint] [ticket]
+              cache prune [maxAgeDays] [maxFailures]
+              mesh start [alpn]
+              mesh info
+              mesh conv <conversationId> <nodeId1> [nodeId2 ...]
+              mesh send <conversationId> <text>
+              mesh stop
+              exit | quit
+            """);
+    }
+}

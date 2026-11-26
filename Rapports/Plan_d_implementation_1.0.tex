@@ -672,49 +672,33 @@ Pour que le même cœur protocolaire tourne aussi bien sur un poste client (Wind
 
 \subsubsection{Mécanisme de Peer Caching, ordre de priorité et tolérance aux pannes}
 
-Lorsqu'un client Whispernet redémarre après avoir été fermé, ou lorsqu'il subit une coupure réseau temporaire (veille, changement de Wi-Fi) qui vide sa \emph{Vue Active} et sa \emph{Vue Passive}, il doit pouvoir retrouver le maillage P2P automatiquement sans obliger l'utilisateur à recoller manuellement un ticket d'invitation. C'est le rôle du \textbf{Peer Caching} (implémenté en logique pure dans \texttt{Whispernet.Core/PeerCacheEngine.cs} et persisté dans SQLite via \texttt{Whispernet.App/SqlitePeerCacheRepository.cs}).
+Au redémarrage ou après une coupure réseau, le \textbf{Peer Caching} (\texttt{PeerCacheEngine.cs} et \texttt{SqlitePeerCacheRepository.cs}) permet de retrouver le maillage automatiquement sans resaisir de ticket.
 
-\paragraph{1. Dans quel ordre trier la liste du cache ? (Plus anciens en dernier).}
-En pair-à-pair, il faut distinguer deux notions d'« ancienneté » :
-\begin{itemize}
-    \item \textbf{L'âge de dernière présence (\texttt{LastSeenUtc} ancien = vu il y a longtemps)} : un pair qu'on n'a pas vu depuis 4 jours a très probablement éteint sa machine ou changé d'adresse IP. Il doit donc être placé \textbf{en dernier} dans la liste de reconnexion, et être le \textbf{premier évincé} (politique \emph{LRU — Least Recently Used}) lorsque le cache est plein.
-    \item \textbf{La fidélité historique (\texttt{SuccessCount} élevé = « vétéran » vu récemment)} : à l'inverse, un pair vu récemment \emph{et} avec lequel nous avons déjà communiqué avec succès de nombreuses fois est statistiquement bien plus stable qu'un pair inconnu croisé une seule fois.
-\end{itemize}
-
-La liste du cache est donc toujours maintenue et interrogée dans SQLite selon cet \textbf{ordre strict de priorité (du 1\textsuperscript{er} au dernier)} :
+\paragraph{1. Ordre de priorité (du 1\textsuperscript{er} au dernier)} :
 \begin{enumerate}
-    \item \textbf{En 1\textsuperscript{er} — Les Points de Meeting 24/24 (\texttt{NodeRole::MeetingPoint})} : toujours en tête, car ils sont allumés en permanence avec un \texttt{EndpointId} fixe.
-    \item \textbf{En 2\textsuperscript{e} — Les pairs « frais et fidèles » (\texttt{ConsecutiveFailures == 0})} : triés par fraîcheur (\texttt{LastSeenUtc} le plus récent d'abord) puis par fidélité (\texttt{SuccessCount} décroissant).
-    \item \textbf{En 3\textsuperscript{e} — Les pairs en probation (\texttt{0 < ConsecutiveFailures < 5})} : ceux qui ont échoué récemment mais n'ont pas encore atteint le seuil d'éviction, triés du moins d'échecs au plus d'échecs.
-    \item \textbf{En dernier — Les pairs les plus anciens (\texttt{LastSeenUtc} le plus vieux)} : essayés en tout dernier ressort et purgés en premier par LRU.
+    \item \textbf{\texttt{MeetingPoint} 24/24} : toujours en tête et immunisés contre l'éviction automatique.
+    \item \textbf{Pairs frais et fidèles (\texttt{ConsecutiveFailures == 0})} : triés par \texttt{LastSeenUtc} décroissant (plus récent d'abord) puis \texttt{SuccessCount} décroissant.
+    \item \textbf{Pairs en probation (\texttt{0 < ConsecutiveFailures < 5})} : triés du moins d'échecs au plus d'échecs.
+    \item \textbf{Pairs les plus anciens} : essayés en dernier et évincés en premier (politique \emph{LRU}).
 \end{enumerate}
 
-\paragraph{2. Tolérance avant d'évincer un pair du cache.}
-Évincer un pair dès le premier échec de connexion serait trop agressif (le pair peut simplement être en train de redémarrer sa box ou de changer de réseau). Chaque entrée \texttt{CachedPeerEntry} maintient donc un compteur d'échecs consécutifs (\texttt{ConsecutiveFailures}) gouverné par les règles suivantes :
-
+\paragraph{2. Tolérance aux pannes et \emph{Grace Fallback}} :
 \begin{table}[h!]
 \centering
-\small
-\begin{tabular}{@{}llp{7.2cm}@{}}
+\footnotesize
+\begin{tabular}{@{}llp{7.6cm}@{}}
 \toprule
-\textbf{Paramètre} & \textbf{Valeur par défaut} & \textbf{Comportement exact} \\
+\textbf{Paramètre} & \textbf{Défaut} & \textbf{Rôle} \\
 \midrule
-\texttt{MaxConsecutiveFailures} & \texttt{5} échecs consécutifs & Un pair standard (\texttt{Peer}) n'est évincé du cache qu'au bout de 5 tentatives échouées d'affilée. Dès qu'une connexion réussit, \texttt{ConsecutiveFailures} retombe à \texttt{0}. \\
-\texttt{RetryCooldownBase} & \texttt{10 secondes} & Refroidissement exponentiel ($10\text{s}, 20\text{s}, 40\text{s}, 80\text{s}\dots$) entre deux tentatives sur le même pair en échec, pour essayer d'autres candidats entre-temps. \\
-\texttt{PeerCacheMaxAge} (TTL) & \texttt{7 jours} & Durée maximale d'inactivité au-delà de laquelle un pair standard est considéré comme périmé (\emph{stale}). \\
-Immunité \texttt{MeetingPoint} & Toujours active & Les Points de Meeting 24/24 ne sont \textbf{jamais} évincés du cache (même après 10 échecs locaux si l'utilisateur n'a plus de Wi-Fi). \\
+\texttt{MaxConsecutiveFailures} & \texttt{5} échecs & Éviction après 5 échecs d'affilée (remis à \texttt{0} dès qu'un contact réussit). \\
+\texttt{RetryCooldownBase} & \texttt{10 s} & Backoff exponentiel ($10\text{s}, 20\text{s}, 40\text{s}\dots$) entre deux tentatives sur le même pair. \\
+\texttt{PeerCacheMaxAge} (TTL) & \texttt{7 jours} & Âge maximal d'un pair standard avant d'être marqué périmé (\emph{stale}). \\
+Immunité \texttt{MeetingPoint} & Toujours active & Les Points de Meeting ne sont jamais purgés automatiquement. \\
 \bottomrule
 \end{tabular}
-\caption{Politique de tolérance et seuils d'éviction du Peer Cache}
 \end{table}
 
-\paragraph{3. Gestion du cas d'un historique 100\,\% périmé (\emph{Grace Fallback}).}
-Que se passe-t-il si un utilisateur part en vacances et rouvre Whispernet après 3 semaines ? Tous les pairs standards de sa base SQLite ont dépassé le TTL de 7 jours (\texttt{PeerCacheMaxAge}).
-\begin{itemize}
-    \item Si on supprimait aveuglément toutes les entrées de plus de 7 jours au démarrage, le client perdrait tous ses anciens contacts avant même d'avoir essayé de les joindre.
-    \item \textbf{Solution (\texttt{AllowStaleFallbackWhenCacheEmpty = true})} : lors de l'hydratation (\texttt{HydrateFromPeerCache}), si \emph{aucun} pair standard frais n'est disponible, le moteur active le mode \textbf{Grace Fallback} : il conserve les meilleurs anciens pairs (triés par \texttt{SuccessCount} puis \texttt{LastSeenUtc}) mais les place en probation à \texttt{ConsecutiveFailures = Max - 1} (soit \textbf{1 seule chance}).
-    \item Lors de la reconnexion (\texttt{InitiateReconnection}), le nœud contacte en priorité les \texttt{MeetingPoint} 24/24 ainsi que ces pairs en sursis : ceux qui répondent retombent immédiatement à \texttt{ConsecutiveFailures = 0} (sauvés), tandis que ceux qui échouent atteignent \texttt{MaxConsecutiveFailures} et sont immédiatement purgés de SQLite. Si absolument aucun pair ni \texttt{MeetingPoint} ne répond, l'action \texttt{OutAction::PeerCacheExhausted} est émise vers l'UI pour inviter l'utilisateur à saisir un nouveau ticket.
-\end{itemize}
+Si tout le cache standard dépasse 7 jours après une longue absence, le mode \textbf{\emph{Grace Fallback}} (\texttt{AllowStaleFallbackWhenCacheEmpty}) accorde \textbf{1 dernière chance} (\texttt{ConsecutiveFailures = Max - 1}) aux anciens pairs les plus fiables : ceux qui répondent sont réhabilités, les autres sont purgés. Si aucun pair ni \texttt{MeetingPoint} ne répond, \texttt{OutAction::PeerCacheExhausted} invite l'utilisateur à saisir un nouveau ticket.
 
 \subsubsection{Mainline DHT : Découverte décentralisée et les 3 cas d'usage}
 
@@ -731,8 +715,8 @@ Par conséquent, \textbf{la DHT ne transporte jamais les messages du chat} : ell
 \paragraph{2. Les 3 cas d'usage de la DHT dans Whispernet.}
 
 \begin{enumerate}
-    \item \textbf{Cas 1 — Messagerie 1-to-1 et petits groupes ($\le 10$ membres)} (\texttt{DirectMeshService}) :
-    Pour les conversations privées ou en petit comité, il n'est pas nécessaire d'activer HyParView et Plumtree. Chaque participant enregistre uniquement les \texttt{NodeId} fixes de ses contacts. Au premier message envoyé, \texttt{ConnectSmartAsync} résout l'adresse actuelle du destinataire via la Mainline DHT (si le ticket en cache échoue ou est absent), puis réutilise la connexion QUIC persistante pour tous les messages suivants.
+    \item \textbf{Cas 1 — Messagerie 1-to-1 et petits groupes ($\le 13$ pairs directs)} :
+    Tant qu'un pair connaît $\le 13$ autres membres dans le groupe, il maintient jusqu'à 13 connexions QUIC directes 1-on-1 dans sa \texttt{ActiveView} (résolues au premier contact via la Mainline DHT si le ticket en cache est absent), sans relais multi-sauts.
 
     \item \textbf{Cas 2 — Démarrage de HyParView avec un cache de pairs périmé} (\texttt{InitiateReconnection}) :
     Si un client revient après une longue absence et que tous les \texttt{EndpointTicket} stockés dans sa table SQLite \texttt{peer\_cache} sont obsolètes (IP ou relais changés), leur \texttt{NodeId} cryptographique reste identique. \texttt{PeerCacheEngine.InitiateReconnection} émet alors \texttt{OutAction::Connect(..., AllowDhtLookup: true)} pour retrouver les pairs en sursis (\emph{Grace Fallback}) ou les Points de Meeting 24/24 directement via la Mainline DHT.
@@ -790,16 +774,16 @@ Lorsque l'utilisateur renseigne un mot de passe, la clé privée et l'ensemble d
 
 \begin{center}
 \begin{tikzpicture}[
-    node distance=0.8cm and 1.2cm,
-    box/.style={rectangle, draw=PrimaryBlue, thick, fill=SoftBg, rounded corners=4pt, minimum width=3.1cm, minimum height=0.85cm, align=center, font=\footnotesize\bfseries},
-    sec/.style={rectangle, draw=AccentTeal, thick, fill=white, rounded corners=4pt, minimum width=3.1cm, minimum height=0.85cm, align=center, font=\footnotesize},
-    arr/.style={-{Stealth[length=2.3mm]}, thick, PrimaryBlue}
+    node distance=0.55cm and 0.65cm,
+    box/.style={rectangle, draw=PrimaryBlue, thick, fill=SoftBg, rounded corners=4pt, minimum width=2.7cm, minimum height=0.8cm, align=center, font=\scriptsize\bfseries},
+    sec/.style={rectangle, draw=AccentTeal, thick, fill=white, rounded corners=4pt, minimum width=2.8cm, minimum height=0.8cm, align=center, font=\scriptsize},
+    arr/.style={-{Stealth[length=2.1mm]}, thick, PrimaryBlue}
 ]
-    \node[box] (pwd) {Mot de passe + Sel (16 o)};
-    \node[sec, right=1.3cm of pwd] (kdf) {PBKDF2-HMAC-SHA256\\(600\,000 itérations) $\rightarrow$ \textbf{KEK}};
-    \node[sec, above right=0.5cm and 1.3cm of kdf] (key) {\texttt{identity.key.enc}\\(AES-256-GCM + AAD)};
-    \node[sec, below right=0.5cm and 1.3cm of kdf] (dek) {\texttt{folder.dek.enc}\\(DEK 256 bits enveloppée)};
-    \node[box, right=1.1cm of dek] (vault) {Dossier \texttt{vault/}\\(AES-256-GCM par fichier)};
+    \node[box] (pwd) {Mot de passe\\+ Sel (16 o)};
+    \node[sec, right=0.65cm of pwd] (kdf) {PBKDF2-SHA256\\(600\,000 itér.) $\rightarrow$ \textbf{KEK}};
+    \node[sec, above right=0.35cm and 0.7cm of kdf] (key) {\texttt{identity.key.enc}\\(AES-256-GCM + AAD)};
+    \node[sec, below right=0.35cm and 0.7cm of kdf] (dek) {\texttt{folder.dek.enc}\\(DEK 256 bits)};
+    \node[box, right=0.65cm of dek] (vault) {Dossier \texttt{vault/}\\(AES-256-GCM)};
 
     \draw[arr] (pwd) -- (kdf);
     \draw[arr] (kdf) -- (key);
@@ -825,5 +809,166 @@ Le module \texttt{WhispernetPaths} centralise l'emplacement des données applica
 \end{itemize}
 
 Sous cette racine, l'arborescence regroupe \texttt{accounts/<authorId>/} (\texttt{profile.json}, \texttt{identity.key[.enc]}, \texttt{folder.dek.enc}, \texttt{vault/}) ainsi que la base SQLite \texttt{peer\_cache.db}. Un paramètre optionnel \texttt{rootDirectory} reste injectable pour isoler les tests automatisés.
+
+\subsection{Administration et modération des groupes}
+
+Un groupe est identifié par \texttt{GroupId = SHA-256(OwnerPublicKeySpki)}. Comme chaque lien pair-à-pair est déjà chiffré de bout en bout par \textbf{QUIC / TLS 1.3} (Iroh), la sécurité du groupe ne nécessite aucune rotation de clé par époque : elle repose sur l'authentification de l'\texttt{AuthorId} et deux structures signées :
+\begin{enumerate}
+    \item \textbf{\texttt{GroupManifest} (signé par le créateur)} : définit le titre, le mot de passe d'admission optionnel, le TTL des messages éphémères, la fermeture définitive (\texttt{IsTerminated}) et la liste des clés publiques des \textbf{Modérateurs}.
+    \item \textbf{Liste d'admis et de modération (CRDT LWW signé par un modérateur ou le créateur)} : registre distribué associant chaque \texttt{AuthorId} à un statut (\texttt{Admitted}, \texttt{Silenced}, \texttt{Banned}), fusionné de manière déterministe par \emph{Last-Write-Wins} \texttt{(LamportClock, Timestamp, SignerId)}.
+\end{enumerate}
+
+\begin{center}
+\begin{tikzpicture}[
+    node distance=0.7cm and 0.8cm,
+    owner/.style={rectangle, draw=PrimaryBlue, thick, fill=SoftBg, rounded corners=4pt, minimum width=3.1cm, minimum height=0.85cm, align=center, font=\scriptsize\bfseries},
+    mod/.style={rectangle, draw=AccentTeal, thick, fill=white, rounded corners=4pt, minimum width=3.2cm, minimum height=0.85cm, align=center, font=\scriptsize},
+    peer/.style={rectangle, draw=WarmAmber, thick, fill=SoftBg, rounded corners=4pt, minimum width=3.2cm, minimum height=0.85cm, align=center, font=\scriptsize},
+    arr/.style={-{Stealth[length=2.1mm]}, thick, PrimaryBlue}
+]
+    \node[owner] (own) {Clé Créateur (Owner)\\$\texttt{GroupId} = \text{SHA256}(\text{PubKey})$};
+    \node[mod, right=0.8cm of own] (manifest) {\texttt{GroupManifest}\\Règles + Clés Modérateurs};
+    \node[mod, right=0.8cm of manifest] (crdt) {Liste d'admis CRDT (LWW)\\\texttt{AuthorId} $\rightarrow$ \texttt{Admitted|Silenced|Banned}};
+
+    \node[peer, below=1.0cm of manifest] (alice) {Membre de retour hors-ligne\\(\texttt{AuthorId} = \textbf{Admitted})};
+    \node[peer, below=1.0cm of crdt] (bob2) {Banni ou nouveau compte\\(\textbf{Banned} / \textbf{Unknown})};
+
+    \draw[arr] (own) -- node[above, font=\scriptsize] {signe} (manifest);
+    \draw[arr] (manifest) -- node[above, font=\scriptsize] {autorise} (crdt);
+    \draw[arr, AccentTeal] (crdt) -- node[left, font=\scriptsize\bfseries] {Accès QUIC autorisé} (alice);
+    \draw[arr, WarmAmber, dashed] (crdt) -- node[right, font=\scriptsize\bfseries] {Refus + Déconnexion} (bob2);
+\end{tikzpicture}
+\end{center}
+
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}lllp{6.0cm}@{}}
+\toprule
+\textbf{Statut (\texttt{AuthorId})} & \textbf{Publier} & \textbf{Recevoir (Overlay)} & \textbf{Comportement (retour hors-ligne / anti-Sybil)} \\
+\midrule
+\textbf{\texttt{Admitted}} & Oui & Oui & Rejoint immédiatement après une absence sans perte ni rotation de clé \\
+\textbf{\texttt{Silenced}} & Non (filtré) & Oui & Reçoit les messages mais ses envois sont ignorés dès le 1\textsuperscript{er} saut \\
+\textbf{\texttt{Banned}} & Non & Non (éjecté) & Déconnecté de HyParView/Plumtree ; aucun pair ne lui relaie les messages \\
+\textbf{\texttt{Unknown}} \emph{(non admis)} & Non & Non (refusé) & Empêche un banni de revenir avec un nouveau compte sans ré-admission \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Topologie unifiée des groupes ($\le 13$ connexions directes vs $\lceil \ln(N) \rceil + 2$)}
+
+Il n'existe \textbf{aucune différence structurelle} entre un petit et un grand groupe : tous utilisent le même état \texttt{NodeState} (\texttt{HyParView} + \texttt{Plumtree}) avec une capacité de Vue Active adaptative :
+\[
+k_{\text{active}}(N) =
+\begin{cases}
+N - 1 \quad (\le 13) & \text{si } N - 1 \le 13 \quad \text{(connexions 1-on-1 directes, livraison en 1 saut)} \\
+\lceil \ln(N) \rceil + 2 & \text{si } N - 1 > 13 \quad \text{(overlay partiel, propagation multi-sauts Plumtree)}
+\end{cases}
+\]
+
+\begin{center}
+\begin{tikzpicture}[
+    peer/.style={circle, draw=PrimaryBlue, thick, fill=SoftBg, minimum size=6.2mm, inner sep=0pt, font=\scriptsize\bfseries},
+    passive/.style={circle, draw=BorderGray, dashed, fill=white, minimum size=5.8mm, inner sep=0pt, font=\scriptsize},
+    panel/.style={draw=BorderGray, rounded corners=5pt, inner sep=8pt},
+    direct/.style={thick, PrimaryBlue},
+    gossip/.style={-{Stealth[length=2mm]}, thick, AccentTeal}
+]
+    % --- Panneau gauche : Petit groupe (<= 13 pairs directs) ---
+    \node[peer, fill=PrimaryBlue!18] (S) at (0,0) {Moi};
+    \node[peer] (P1) at (1.5, 0.9) {P1};
+    \node[peer] (P2) at (1.8, 0.0) {P2};
+    \node[peer] (P3) at (1.5,-0.9) {P3};
+    \node[peer] (P4) at (-1.3, 0.7) {P4};
+    \node[peer] (P5) at (-1.3,-0.7) {P5};
+
+    \foreach \p in {P1,P2,P3,P4,P5} {
+        \draw[direct] (S) -- (\p);
+    }
+    \draw[direct, opacity=0.35] (P1) -- (P2) -- (P3) -- (P5) -- (P4) -- (P1);
+    \node[below=1.25cm of S, align=center, font=\footnotesize] {\textbf{1. Petit groupe ($N - 1 \le 13$)}\\\texttt{ActiveView} $\le 13$ (1-on-1 direct, 1 saut), \texttt{PassiveView} $= 0$};
+
+    % --- Flèche de transition ---
+    \draw[-{Stealth[length=2.4mm]},{Stealth[length=2.4mm]}-, very thick, WarmAmber]
+        (2.5, 0) -- node[above, font=\scriptsize\bfseries] {$N - 1 > 13$} node[below, font=\scriptsize] {auto} (4.1, 0);
+
+    % --- Panneau droit : Grand groupe (> 13 pairs) ---
+    \node[peer, fill=PrimaryBlue!18] (L) at (6.6,0) {Moi};
+    \node[peer] (A1) at (8.1, 0.85) {A1};
+    \node[peer] (A2) at (8.1,-0.85) {A2};
+    \node[peer] (A3) at (5.2, 0.75) {A3};
+    \node[peer] (R1) at (9.6, 1.15) {R1};
+    \node[peer] (R2) at (9.6, 0.35) {R2};
+    \node[passive] (V1) at (5.1,-0.85) {V1};
+    \node[passive] (V2) at (6.6,-1.05) {V2};
+
+    \draw[gossip] (L) -- (A1);
+    \draw[gossip] (L) -- (A2);
+    \draw[gossip] (L) -- (A3);
+    \draw[gossip] (A1) -- (R1);
+    \draw[gossip] (A1) -- (R2);
+    \draw[dashed, BorderGray] (A2) -- (R2);
+
+    \node[below=1.25cm of L, align=center, font=\footnotesize] {\textbf{2. Grand groupe ($N - 1 > 13$)}\\\texttt{ActiveView} $= \lceil \ln(N) \rceil + 2$, propagation Plumtree + \texttt{PassiveView}};
+\end{tikzpicture}
+\end{center}
+
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}ccccl@{}}
+\toprule
+\textbf{Pairs connus ($N-1$)} & \textbf{Taille ($N$)} & \textbf{Capacité \texttt{ActiveView}} & \textbf{\texttt{PassiveView}} & \textbf{Acheminement des messages} \\
+\midrule
+$1 \dots 13$ & $2 \dots 14$ & $N - 1$ ($\le 13$ directs) & $0$ & Envoi 1-on-1 direct en 1 saut \\
+$14$ & $15$ & $\lceil \ln(15) \rceil + 2 = \mathbf{5}$ & $9$ & Propagation multi-sauts Plumtree \\
+$100$ & $101$ & $\lceil \ln(101) \rceil + 2 = \mathbf{7}$ & $93$ & Propagation multi-sauts Plumtree \\
+$1\,000$ & $1\,001$ & $\lceil \ln(1001) \rceil + 2 = \mathbf{9}$ & Bornée ($k_{\text{passive}}$) & Propagation multi-sauts Plumtree \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Structure des messages et tri causal (\texttt{ChatEvent} DAG)}
+
+Chaque message applicatif est un nœud signé d'un \textbf{graphe acyclique dirigé (DAG) causal} :
+
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}llp{7.8cm}@{}}
+\toprule
+\textbf{Champ} & \textbf{Type} & \textbf{Rôle et règle cryptographique} \\
+\midrule
+\texttt{event\_id} & \texttt{[u8; 32]} & \texttt{SHA-256(parents || payload)} : identifiant unique du message. \\
+\texttt{room\_id} & \texttt{[u8; 32]} & \texttt{GroupId = SHA-256(GroupOwnerPubKey)} signant les règles du groupe. \\
+\texttt{author\_id} & \texttt{PublicKey} & Clé publique de l'auteur (dont le condensat SHA-256 est l'\texttt{AuthorId}). \\
+\texttt{parents} & \texttt{Vec<[u8; 32]>} & \texttt{event\_id} du ou des messages précédents (\textbf{limite : 1 à 15 parents}). \\
+\texttt{logical\_clock} & \texttt{u64} & Horloge de Lamport : $\max(\text{parent.logical\_clock}) + 1$. \\
+\texttt{timestamp\_ms} & \texttt{u64} & Départage \emph{uniquement} les messages concurrents (même \texttt{logical\_clock}). \\
+\texttt{payload} & \texttt{Bytes} & Contenu applicatif du message. \\
+\texttt{signature} & \texttt{Signature} & Signature ECDSA P-256 de l'auteur couvrant l'ensemble de l'événement. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{center}
+\begin{tikzpicture}[
+    evt/.style={rectangle, draw=PrimaryBlue, thick, fill=SoftBg, rounded corners=4pt, minimum width=2.8cm, minimum height=0.85cm, align=center, font=\scriptsize},
+    merge/.style={rectangle, draw=AccentTeal, thick, fill=white, rounded corners=4pt, minimum width=3.1cm, minimum height=0.85cm, align=center, font=\scriptsize},
+    order/.style={rectangle, draw=WarmAmber, thick, fill=SoftBg, rounded corners=4pt, minimum width=3.2cm, minimum height=0.85cm, align=center, font=\scriptsize\bfseries},
+    arr/.style={-{Stealth[length=2.1mm]}, thick, PrimaryBlue}
+]
+    \node[evt] (e1) at (0,0) {\textbf{E1}\\$\text{clock}=1,\ \text{ts}=1000$};
+    \node[evt] (e2) at (3.6, 0.7) {\textbf{E2} (Pair A)\\$\text{clock}=2,\ \text{ts}=1050$};
+    \node[evt] (e3) at (3.6,-0.7) {\textbf{E3} (Pair B)\\$\text{clock}=2,\ \text{ts}=1040$};
+    \node[merge] (e4) at (7.5,0) {\textbf{E4} ($\le 15$ parents)\\$\text{parents}=[E2,E3],\ \text{clock}=3$};
+    \node[order] (hist) at (11.5,0) {Historique trié :\\$\mathbf{E1 \rightarrow E3 \rightarrow E2 \rightarrow E4}$};
+
+    \draw[arr] (e1) -- node[above left, font=\tiny] {parent} (e2);
+    \draw[arr] (e1) -- node[below left, font=\tiny] {parent} (e3);
+    \draw[arr] (e2) -- (e4);
+    \draw[arr] (e3) -- (e4);
+    \draw[-{Stealth[length=2.2mm]}, very thick, WarmAmber] (e4) -- (hist);
+\end{tikzpicture}
+\end{center}
+
+À chaque message reçu, l'historique converge vers le même ordre sur tous les pairs selon 3 critères : \textbf{(1)} ordre causal des \texttt{parents}, \textbf{(2)} \texttt{logical\_clock} croissant, puis \textbf{(3)} \texttt{timestamp\_ms} croissant en cas d'envoi simultané (ex. \textbf{E3} avant \textbf{E2} car $1040 < 1050$ à $\text{clock}=2$).
 
 \end{document}
