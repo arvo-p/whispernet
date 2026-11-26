@@ -216,7 +216,7 @@ public static class HyParViewEngine
         state.KnownRoles[sender] = role;
         state.PendingNeighbors.Remove(sender);
 
-        bool hasSpace = state.ActiveView.Count < state.Config.MaxActiveViewSize;
+        bool hasSpace = state.ActiveView.Count < state.EffectiveMaxActiveViewSize;
         if (highPriority || hasSpace || state.ActiveView.Contains(sender))
         {
             EmitLog(state, actions, ProtocolLogLevel.Info, $"Réception NEIGHBOR(highPriority={highPriority}) de {sender} -> ACCEPTÉ.");
@@ -467,7 +467,7 @@ public static class HyParViewEngine
             return;
         }
 
-        if (state.ActiveView.Count >= state.Config.MaxActiveViewSize)
+        if (state.ActiveView.Count >= state.EffectiveMaxActiveViewSize)
         {
             DropRandomNodeFromActiveView(state, actions, rng);
         }
@@ -476,6 +476,7 @@ public static class HyParViewEngine
         state.PendingNeighbors.Remove(node);
         state.ActiveView.Add(node);
         state.SeenNodesInCurrentEpoch.Add(node);
+        TrimActiveViewToEffectiveCapacity(state, actions, rng);
 
         NodeRole role = state.KnownRoles.GetValueOrDefault(node, NodeRole.Peer);
         PeerCacheEngine.RecordPeerSuccess(state, node, DateTimeOffset.UtcNow, actions);
@@ -558,6 +559,30 @@ public static class HyParViewEngine
 
         state.PassiveView.Add(node);
         PeerCacheEngine.ObserveDiscoveredPeer(state, node, DateTimeOffset.UtcNow, actions);
+        TrimActiveViewToEffectiveCapacity(state, actions, rng);
+    }
+
+    /// <summary>
+    /// Met à jour le régime d'hystérésis et réduit la Vue Active si la capacité effective vient de diminuer
+    /// (ex. bascule Full Mesh -&gt; Plumtree au-delà de 16 pairs).
+    /// </summary>
+    public static void TrimActiveViewToEffectiveCapacity(
+        HyParViewState state,
+        List<OutAction> actions,
+        Random rng)
+    {
+        bool switched = state.UpdateTopologyRegime();
+        if (switched)
+        {
+            string mode = state.IsInPlumtreeOverlayMode ? "Plumtree (ceil(ln(N))+2)" : "FullMesh (direct)";
+            EmitLog(state, actions, ProtocolLogLevel.Info,
+                $"Adaptive topology transition -> {mode} (KnownPeers={state.KnownOnlinePeersCount}, EffectiveMaxActive={state.EffectiveMaxActiveViewSize}).");
+        }
+
+        while (state.ActiveView.Count > state.EffectiveMaxActiveViewSize)
+        {
+            DropRandomNodeFromActiveView(state, actions, rng);
+        }
     }
 
     private static void TryPromoteFromPassiveView(

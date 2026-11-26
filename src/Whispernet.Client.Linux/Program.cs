@@ -22,6 +22,16 @@ internal static class Program
             return await RunTuiDemoAsync(effectiveRoot, accountService).ConfigureAwait(false);
         }
 
+        if (args.Contains("--sim-dag", StringComparer.OrdinalIgnoreCase))
+        {
+            return await RunSimDagDemoAsync(effectiveRoot, accountService).ConfigureAwait(false);
+        }
+
+        if (args.Contains("--mod-demo", StringComparer.OrdinalIgnoreCase))
+        {
+            return await RunModQueueDemoAsync(effectiveRoot, accountService).ConfigureAwait(false);
+        }
+
         bool forceCli = args.Contains("--cli", StringComparer.OrdinalIgnoreCase);
         bool forceTui = args.Contains("--tui", StringComparer.OrdinalIgnoreCase);
         if (forceTui || (!forceCli && !Console.IsInputRedirected))
@@ -34,7 +44,7 @@ internal static class Program
         AccountSession? activeSession = null;
         SqlitePeerCacheRepository? peerCache = null;
         IrohEndpointAdapter? transport = null;
-        DirectMeshService? directMesh = null;
+        GroupMeshService? directMesh = null;
         CancellationTokenSource? meshCts = null;
 
         Console.WriteLine("Whispernet.App Interactive CLI");
@@ -190,11 +200,14 @@ internal static class Program
             {
                 if (tokens.Count < 3)
                 {
-                    Console.WriteLine("Usage: account unlock <username|authorId>");
+                    Console.WriteLine("Usage: account unlock <username|authorId> [password]");
                     return activeSession;
                 }
 
                 string query = tokens[2];
+                string? inlinePassword = tokens.Count >= 4 && !tokens[3].Equals("--no-password", StringComparison.OrdinalIgnoreCase)
+                    ? tokens[3]
+                    : null;
                 IReadOnlyList<AccountProfile> accounts = await accountService.ListAccountsAsync().ConfigureAwait(false);
 
                 List<AccountProfile> matches = accounts
@@ -202,6 +215,18 @@ internal static class Program
                         a.AuthorId.Value.Equals(query, StringComparison.Ordinal) ||
                         a.Username.Equals(query, StringComparison.Ordinal))
                     .ToList();
+
+                if (matches.Count > 1 && string.IsNullOrEmpty(inlinePassword))
+                {
+                    AccountProfile? latestPasswordless = matches
+                        .Where(a => !a.IsPasswordProtected)
+                        .OrderByDescending(a => a.CreatedAtUtc)
+                        .FirstOrDefault();
+                    if (latestPasswordless is not null)
+                    {
+                        matches = new List<AccountProfile> { latestPasswordless };
+                    }
+                }
 
                 if (matches.Count == 0)
                 {
@@ -220,9 +245,9 @@ internal static class Program
                 }
 
                 AccountProfile target = matches[0];
-                string? password = target.IsPasswordProtected
-                    ? ReadPassword("Password: ")
-                    : null;
+                string? password = !target.IsPasswordProtected
+                    ? null
+                    : (inlinePassword ?? ReadPassword("Password: "));
 
                 AccountSession newSession = await accountService.UnlockAccountAsync(target.AuthorId, password).ConfigureAwait(false);
                 activeSession?.Dispose();
@@ -483,12 +508,12 @@ internal static class Program
         }
     }
 
-    private static async Task<(IrohEndpointAdapter? Transport, DirectMeshService? Mesh, CancellationTokenSource? Cts)> HandleMeshCommandAsync(
+    private static async Task<(IrohEndpointAdapter? Transport, GroupMeshService? Mesh, CancellationTokenSource? Cts)> HandleMeshCommandAsync(
         List<string> tokens,
         AccountSession? activeSession,
         SqlitePeerCacheRepository? peerCache,
         IrohEndpointAdapter? transport,
-        DirectMeshService? directMesh,
+        GroupMeshService? directMesh,
         CancellationTokenSource? meshCts)
     {
         if (tokens.Count < 2)
@@ -510,7 +535,7 @@ internal static class Program
 
                 string alpn = tokens.Count >= 3 ? tokens[2] : "/whispernet/direct/1";
                 transport = IrohEndpointAdapter.CreateAndBind(alpn: alpn, enableRelay: true, onlineTimeoutMs: 3000);
-                directMesh = new DirectMeshService(transport, peerCache);
+                directMesh = new GroupMeshService(transport, peerCache);
                 directMesh.MessageReceived += msg =>
                 {
                     Console.WriteLine();
@@ -602,7 +627,7 @@ internal static class Program
 
     private static void StopMesh(
         ref IrohEndpointAdapter? transport,
-        ref DirectMeshService? directMesh,
+        ref GroupMeshService? directMesh,
         ref CancellationTokenSource? meshCts)
     {
         meshCts?.Cancel();
@@ -713,6 +738,47 @@ internal static class Program
         await tui.ProcessInputLineAsync("/filter AUTH").ConfigureAwait(false);
         Console.WriteLine("\n=== FRAME 2: TRANSACTION LOGS (FILTERED BY THEME: AUTH) ===");
         Console.WriteLine(tui.RenderFrame(100, 20));
+        return 0;
+    }
+
+    private static async Task<int> RunSimDagDemoAsync(string effectiveRoot, IAccountService accountService)
+    {
+        var tui = new NcursesTui(effectiveRoot, accountService);
+        if (!Console.IsInputRedirected)
+        {
+            _ = Task.Run(tui.RunThreeUserLateMessageSimulationAsync);
+            await tui.RunAsync().ConfigureAwait(false);
+            return 0;
+        }
+
+        (ChatEvent lateE3, string groupId, string groupTitle) = await tui
+            .PrepareThreeUserOutOfOrderScenarioAsync()
+            .ConfigureAwait(false);
+
+        Console.WriteLine("=== STEP 1: BEFORE LATE MESSAGE E3 ARRIVES (Only E1, E2, E4 received) ===");
+        Console.WriteLine(tui.RenderFrame(112, 20));
+
+        await Task.Delay(2000).ConfigureAwait(false);
+        tui.IngestDagEvent(groupId, groupTitle, lateE3, "Charlie");
+
+        Console.WriteLine("\n=== STEP 2: AFTER LATE MESSAGE E3 ARRIVES (Inserted between E1 and E2!) ===");
+        Console.WriteLine(tui.RenderFrame(112, 20));
+        return 0;
+    }
+
+    private static async Task<int> RunModQueueDemoAsync(string effectiveRoot, IAccountService accountService)
+    {
+        var tui = new NcursesTui(effectiveRoot, accountService);
+        await tui.PrepareModeratorQueueDemoAsync().ConfigureAwait(false);
+
+        Console.WriteLine("=== MODERATOR PENDING APPROVALS QUEUE (Before Accept/Ignore) ===");
+        Console.WriteLine(tui.RenderFrame(112, 20));
+
+        await tui.ProcessInputLineAsync("/mod accept Bob").ConfigureAwait(false);
+        await tui.ProcessInputLineAsync("/mod ignore Charlie").ConfigureAwait(false);
+
+        Console.WriteLine("\n=== MODERATOR PENDING APPROVALS QUEUE (After Accept Bob + Ignore Charlie) ===");
+        Console.WriteLine(tui.RenderFrame(112, 20));
         return 0;
     }
 

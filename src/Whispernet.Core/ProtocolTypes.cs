@@ -1,3 +1,6 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
 namespace Whispernet.Core;
 
 /// <summary>
@@ -20,12 +23,44 @@ public readonly record struct MsgId(string Value)
 /// Identifiant cryptographique d'un auteur (SHA-256 hexadécimal de sa clé publique SPKI).
 /// Indépendant du <see cref="NodeId"/> réseau.
 /// </summary>
+[JsonConverter(typeof(AuthorIdJsonConverter))]
 public readonly record struct AuthorId(string Value)
 {
     public bool IsValid =>
         !string.IsNullOrWhiteSpace(Value) &&
         Value.Length == 64 &&
         Value.All(static c => c is (>= '0' and <= '9') or (>= 'a' and <= 'f'));
+
+    public override string ToString() => Value;
+}
+
+public sealed class AuthorIdJsonConverter : JsonConverter<AuthorId>
+{
+    public override AuthorId Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        => new(reader.GetString() ?? string.Empty);
+
+    public override void Write(Utf8JsonWriter writer, AuthorId value, JsonSerializerOptions options)
+        => writer.WriteStringValue(value.Value);
+
+    public override AuthorId ReadAsPropertyName(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        => new(reader.GetString() ?? string.Empty);
+
+    public override void WriteAsPropertyName(Utf8JsonWriter writer, AuthorId value, JsonSerializerOptions options)
+        => writer.WritePropertyName(value.Value);
+}
+
+/// <summary>
+/// Identifiant cryptographique d'un groupe (SHA-256 hexadécimal de la clé publique SPKI du créateur).
+/// </summary>
+public readonly record struct GroupId(string Value)
+{
+    public bool IsValid =>
+        !string.IsNullOrWhiteSpace(Value) &&
+        Value.Length == 64 &&
+        Value.All(static c => c is (>= '0' and <= '9') or (>= 'a' and <= 'f'));
+
+    public static GroupId FromOwnerPublicKeySpki(ReadOnlySpan<byte> ownerPublicKeySpki)
+        => new(Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(ownerPublicKeySpki)));
 
     public override string ToString() => Value;
 }

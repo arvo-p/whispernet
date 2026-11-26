@@ -53,6 +53,29 @@ public sealed record HyParViewConfig
     /// <summary>Seuil de Vue Active en dessous duquel un nœud force une sonde anti-îlots même sans détection de boucle.</summary>
     public int MinHealthyActiveViewForNoHeal { get; init; } = 3;
 
+    /// <summary>
+    /// Active le dimensionnement adaptatif avec hystérésis entre maillage direct 1-on-1 et overlay Plumtree.
+    /// </summary>
+    public bool UseAdaptiveActiveViewSize { get; init; } = false;
+
+    /// <summary>
+    /// Seuil haut d'hystérésis : bascule du maillage direct vers Plumtree lorsque les pairs connus dépassent 16 (&gt; 16).
+    /// </summary>
+    public int DirectMeshExpandThreshold { get; init; } = 16;
+
+    /// <summary>
+    /// Seuil bas d'hystérésis : rebascule de Plumtree vers le maillage direct lorsque les pairs connus passent sous 12 (&lt; 12).
+    /// </summary>
+    public int DirectMeshCollapseThreshold { get; init; } = 12;
+
+    /// <summary>Configuration adaptative unifiée avec hystérésis (&gt; 16 Plumtree, &lt; 12 Full Mesh).</summary>
+    public static HyParViewConfig AdaptiveGroupDefaults => new()
+    {
+        UseAdaptiveActiveViewSize = true,
+        DirectMeshExpandThreshold = 16,
+        DirectMeshCollapseThreshold = 12
+    };
+
     /// <summary>Configuration préconisée pour un Raspberry Pi Point de Meeting 24/24.</summary>
     public static HyParViewConfig MeetingPointDefaults => new()
     {
@@ -111,6 +134,67 @@ public sealed class HyParViewState
     /// les îlots isolés et choisir des Pairs Ponts externes lors de <c>PartitionHealTimer</c>.
     /// </summary>
     public HashSet<NodeId> SeenNodesInCurrentEpoch { get; } = new();
+
+    /// <summary>
+    /// État courant d'hystérésis : <c>false</c> = Full Mesh (1-on-1 direct), <c>true</c> = Overlay Plumtree (ceil(ln(N)) + 2).
+    /// </summary>
+    public bool IsInPlumtreeOverlayMode { get; internal set; }
+
+    /// <summary>Estimation locale du nombre total de pairs en ligne (incluant soi-même).</summary>
+    public int EstimatedNetworkSize =>
+        1 + ActiveView.Count + PassiveView.Count + PendingNeighbors.Count;
+
+    /// <summary>Nombre estimé d'autres pairs en ligne dans le groupe.</summary>
+    public int KnownOnlinePeersCount => EstimatedNetworkSize - 1;
+
+    /// <summary>
+    /// Met à jour le régime topologique avec hystérésis :
+    /// Full Mesh -&gt; Plumtree si KnownOnlinePeersCount &gt; DirectMeshExpandThreshold (16) ;
+    /// Plumtree -&gt; Full Mesh si KnownOnlinePeersCount &lt; DirectMeshCollapseThreshold (12).
+    /// </summary>
+    public bool UpdateTopologyRegime()
+    {
+        if (!Config.UseAdaptiveActiveViewSize)
+        {
+            return false;
+        }
+
+        int peers = KnownOnlinePeersCount;
+        bool previous = IsInPlumtreeOverlayMode;
+
+        if (!IsInPlumtreeOverlayMode && peers > Config.DirectMeshExpandThreshold)
+        {
+            IsInPlumtreeOverlayMode = true;
+        }
+        else if (IsInPlumtreeOverlayMode && peers < Config.DirectMeshCollapseThreshold)
+        {
+            IsInPlumtreeOverlayMode = false;
+        }
+
+        return IsInPlumtreeOverlayMode != previous;
+    }
+
+    /// <summary>
+    /// Capacité effective de la Vue Active selon le mode (statique ou adaptatif avec hystérésis).
+    /// </summary>
+    public int EffectiveMaxActiveViewSize
+    {
+        get
+        {
+            if (!Config.UseAdaptiveActiveViewSize)
+            {
+                return Config.MaxActiveViewSize;
+            }
+
+            if (!IsInPlumtreeOverlayMode)
+            {
+                return Config.DirectMeshExpandThreshold;
+            }
+
+            int n = Math.Max(2, EstimatedNetworkSize);
+            return (int)Math.Ceiling(Math.Log(n)) + 2;
+        }
+    }
 
     public HyParViewState(NodeId selfId, NodeRole selfRole = NodeRole.Peer, HyParViewConfig? config = null)
     {

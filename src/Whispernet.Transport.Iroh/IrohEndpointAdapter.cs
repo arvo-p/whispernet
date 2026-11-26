@@ -235,7 +235,7 @@ public sealed class IrohEndpointAdapter : IDisposable
 
             Vec_uint8 buf = iroh.rust_buffer_alloc(0);
             try{
-                if (iroh.recv_stream_read_to_end_timeout(&recvStream, &buf, 256 * 1024, 10000) == EndpointResult.ENDPOINT_RESULT_OK
+                if (iroh.recv_stream_read_to_end_timeout(&recvStream, &buf, 2 * 1024 * 1024, 10000) == EndpointResult.ENDPOINT_RESULT_OK
                     && buf.len > 0 && buf.ptr != null){
                     byte[] managed = new byte[(int)buf.len];
                     Marshal.Copy((IntPtr)buf.ptr, managed, 0, managed.Length);

@@ -812,7 +812,7 @@ Sous cette racine, l'arborescence regroupe \texttt{accounts/<authorId>/} (\textt
 
 \subsection{Administration et modération des groupes}
 
-Un groupe est identifié par \texttt{GroupId = SHA-256(OwnerPublicKeySpki)}. Comme chaque lien pair-à-pair est déjà chiffré de bout en bout par \textbf{QUIC / TLS 1.3} (Iroh), la sécurité du groupe ne nécessite aucune rotation de clé par époque : elle repose sur l'authentification de l'\texttt{AuthorId} et deux structures signées :
+À la création d'un groupe, une nouvelle \textbf{paire de clés ECDSA P-256 dédiée au groupe} (séparée de la clé personnelle \texttt{AuthorId}) est générée : seul l'administrateur en détient la clé privée (permettant de créer autant de groupes que souhaité), et \texttt{GroupId = SHA-256(GroupPublicKeySpki)}. Comme chaque lien pair-à-pair est déjà chiffré de bout en bout par \textbf{QUIC / TLS 1.3} (Iroh), la sécurité du groupe ne nécessite aucune rotation de clé par époque : elle repose sur l'authentification de l'\texttt{AuthorId} et deux structures signées :
 \begin{enumerate}
     \item \textbf{\texttt{GroupManifest} (signé par le créateur)} : définit le titre, le mot de passe d'admission optionnel, le TTL des messages éphémères, la fermeture définitive (\texttt{IsTerminated}) et la liste des clés publiques des \textbf{Modérateurs}.
     \item \textbf{Liste d'admis et de modération (CRDT LWW signé par un modérateur ou le créateur)} : registre distribué associant chaque \texttt{AuthorId} à un statut (\texttt{Admitted}, \texttt{Silenced}, \texttt{Banned}), fusionné de manière déterministe par \emph{Last-Write-Wins} \texttt{(LamportClock, Timestamp, SignerId)}.
@@ -854,14 +854,21 @@ Un groupe est identifié par \texttt{GroupId = SHA-256(OwnerPublicKeySpki)}. Com
 \end{tabular}
 \end{center}
 
-\subsection{Topologie unifiée des groupes ($\le 13$ connexions directes vs $\lceil \ln(N) \rceil + 2$)}
+\paragraph{Séquençage causal (DAG de gouvernance) et compactage.}
+Les décisions (\texttt{Admit}, \texttt{Silence}, \texttt{Ban}, \texttt{PromoteModerator}, \texttt{DemoteModerator}) forment un \textbf{DAG causal} (\texttt{Parents} + \texttt{LamportClock}) rejoué de façon déterministe sur tous les pairs selon \texttt{(LamportClock, Rang[Owner<Mod], IssuedAtUtc, ActionId)} :
+\begin{itemize}
+    \item \textbf{Révocation rétroactive} : si un modérateur révoqué tente de bannir des membres avant que sa révocation (\texttt{DemoteModerator}) n'arrive, le rejeu trie la révocation \emph{avant} ses abus et ignore automatiquement toutes ses décisions ultérieures.
+    \item \textbf{Compactage du journal} : \texttt{CompactGovernanceLog} purge les anciennes décisions obsolètes (remplacées pour un même membre ou annulées), et \texttt{GroupManifest} peut embarquer un \emph{checkpoint} (\texttt{CheckpointLamportClock} + \texttt{CheckpointMemberStates}) pour borner la taille du journal.
+\end{itemize}
 
-Il n'existe \textbf{aucune différence structurelle} entre un petit et un grand groupe : tous utilisent le même état \texttt{NodeState} (\texttt{HyParView} + \texttt{Plumtree}) avec une capacité de Vue Active adaptative :
+\subsection{Topologie unifiée des groupes avec hystérésis (Full Mesh vs $\lceil \ln(N) \rceil + 2$)}
+
+Il n'existe \textbf{aucune différence structurelle} entre un petit et un grand groupe : tous utilisent le même état \texttt{NodeState} (\texttt{HyParView} + \texttt{Plumtree}) avec une capacité de Vue Active adaptative gouvernée par une \textbf{hystérésis} (évitant les oscillations autour d'un seuil unique) :
 \[
 k_{\text{active}}(N) =
 \begin{cases}
-N - 1 \quad (\le 13) & \text{si } N - 1 \le 13 \quad \text{(connexions 1-on-1 directes, livraison en 1 saut)} \\
-\lceil \ln(N) \rceil + 2 & \text{si } N - 1 > 13 \quad \text{(overlay partiel, propagation multi-sauts Plumtree)}
+N - 1 \quad (\le 16) & \text{en mode \textbf{Full Mesh} (bascule vers Plumtree si } N - 1 > 16\text{)} \\
+\lceil \ln(N) \rceil + 2 & \text{en mode \textbf{Plumtree} (retour en Full Mesh uniquement si } N - 1 < 12\text{)}
 \end{cases}
 \]
 
@@ -869,11 +876,10 @@ N - 1 \quad (\le 13) & \text{si } N - 1 \le 13 \quad \text{(connexions 1-on-1 di
 \begin{tikzpicture}[
     peer/.style={circle, draw=PrimaryBlue, thick, fill=SoftBg, minimum size=6.2mm, inner sep=0pt, font=\scriptsize\bfseries},
     passive/.style={circle, draw=BorderGray, dashed, fill=white, minimum size=5.8mm, inner sep=0pt, font=\scriptsize},
-    panel/.style={draw=BorderGray, rounded corners=5pt, inner sep=8pt},
     direct/.style={thick, PrimaryBlue},
     gossip/.style={-{Stealth[length=2mm]}, thick, AccentTeal}
 ]
-    % --- Panneau gauche : Petit groupe (<= 13 pairs directs) ---
+    % --- Panneau gauche : Petit groupe (Full Mesh) ---
     \node[peer, fill=PrimaryBlue!18] (S) at (0,0) {Moi};
     \node[peer] (P1) at (1.5, 0.9) {P1};
     \node[peer] (P2) at (1.8, 0.0) {P2};
@@ -885,21 +891,23 @@ N - 1 \quad (\le 13) & \text{si } N - 1 \le 13 \quad \text{(connexions 1-on-1 di
         \draw[direct] (S) -- (\p);
     }
     \draw[direct, opacity=0.35] (P1) -- (P2) -- (P3) -- (P5) -- (P4) -- (P1);
-    \node[below=1.25cm of S, align=center, font=\footnotesize] {\textbf{1. Petit groupe ($N - 1 \le 13$)}\\\texttt{ActiveView} $\le 13$ (1-on-1 direct, 1 saut), \texttt{PassiveView} $= 0$};
+    \node[below=1.25cm of S, align=center, font=\footnotesize] {\textbf{1. Full Mesh (1-on-1 direct)}\\\texttt{ActiveView} $\le 16$ (1 saut), \texttt{PassiveView} $= 0$};
 
-    % --- Flèche de transition ---
-    \draw[-{Stealth[length=2.4mm]},{Stealth[length=2.4mm]}-, very thick, WarmAmber]
-        (2.5, 0) -- node[above, font=\scriptsize\bfseries] {$N - 1 > 13$} node[below, font=\scriptsize] {auto} (4.1, 0);
+    % --- Flèches d'hystérésis ---
+    \draw[-{Stealth[length=2.2mm]}, thick, WarmAmber]
+        (2.4, 0.25) -- node[above, font=\scriptsize\bfseries] {$N - 1 > 16$} (4.2, 0.25);
+    \draw[-{Stealth[length=2.2mm]}, thick, AccentTeal]
+        (4.2,-0.25) -- node[below, font=\scriptsize\bfseries] {$N - 1 < 12$} (2.4,-0.25);
 
-    % --- Panneau droit : Grand groupe (> 13 pairs) ---
-    \node[peer, fill=PrimaryBlue!18] (L) at (6.6,0) {Moi};
-    \node[peer] (A1) at (8.1, 0.85) {A1};
-    \node[peer] (A2) at (8.1,-0.85) {A2};
-    \node[peer] (A3) at (5.2, 0.75) {A3};
-    \node[peer] (R1) at (9.6, 1.15) {R1};
-    \node[peer] (R2) at (9.6, 0.35) {R2};
-    \node[passive] (V1) at (5.1,-0.85) {V1};
-    \node[passive] (V2) at (6.6,-1.05) {V2};
+    % --- Panneau droit : Grand groupe (Plumtree) ---
+    \node[peer, fill=PrimaryBlue!18] (L) at (6.7,0) {Moi};
+    \node[peer] (A1) at (8.2, 0.85) {A1};
+    \node[peer] (A2) at (8.2,-0.85) {A2};
+    \node[peer] (A3) at (5.3, 0.75) {A3};
+    \node[peer] (R1) at (9.7, 1.15) {R1};
+    \node[peer] (R2) at (9.7, 0.35) {R2};
+    \node[passive] (V1) at (5.2,-0.85) {V1};
+    \node[passive] (V2) at (6.7,-1.05) {V2};
 
     \draw[gossip] (L) -- (A1);
     \draw[gossip] (L) -- (A2);
@@ -908,7 +916,7 @@ N - 1 \quad (\le 13) & \text{si } N - 1 \le 13 \quad \text{(connexions 1-on-1 di
     \draw[gossip] (A1) -- (R2);
     \draw[dashed, BorderGray] (A2) -- (R2);
 
-    \node[below=1.25cm of L, align=center, font=\footnotesize] {\textbf{2. Grand groupe ($N - 1 > 13$)}\\\texttt{ActiveView} $= \lceil \ln(N) \rceil + 2$, propagation Plumtree + \texttt{PassiveView}};
+    \node[below=1.25cm of L, align=center, font=\footnotesize] {\textbf{2. Overlay Plumtree}\\\texttt{ActiveView} $= \lceil \ln(N) \rceil + 2$, propagation multi-sauts};
 \end{tikzpicture}
 \end{center}
 
@@ -916,12 +924,12 @@ N - 1 \quad (\le 13) & \text{si } N - 1 \le 13 \quad \text{(connexions 1-on-1 di
 \footnotesize
 \begin{tabular}{@{}ccccl@{}}
 \toprule
-\textbf{Pairs connus ($N-1$)} & \textbf{Taille ($N$)} & \textbf{Capacité \texttt{ActiveView}} & \textbf{\texttt{PassiveView}} & \textbf{Acheminement des messages} \\
+\textbf{Pairs connus ($N-1$)} & \textbf{Régime actif} & \textbf{Capacité \texttt{ActiveView}} & \textbf{\texttt{PassiveView}} & \textbf{Acheminement des messages} \\
 \midrule
-$1 \dots 13$ & $2 \dots 14$ & $N - 1$ ($\le 13$ directs) & $0$ & Envoi 1-on-1 direct en 1 saut \\
-$14$ & $15$ & $\lceil \ln(15) \rceil + 2 = \mathbf{5}$ & $9$ & Propagation multi-sauts Plumtree \\
-$100$ & $101$ & $\lceil \ln(101) \rceil + 2 = \mathbf{7}$ & $93$ & Propagation multi-sauts Plumtree \\
-$1\,000$ & $1\,001$ & $\lceil \ln(1001) \rceil + 2 = \mathbf{9}$ & Bornée ($k_{\text{passive}}$) & Propagation multi-sauts Plumtree \\
+$1 \dots 16$ & Full Mesh (initial) & $N - 1$ ($\le 16$ directs) & $0$ & Envoi 1-on-1 direct en 1 saut \\
+$17$ ($>16$) & Bascule Plumtree & $\lceil \ln(18) \rceil + 2 = \mathbf{5}$ & $12$ & Propagation multi-sauts Plumtree \\
+$12 \dots 16$ & Hystérésis (reste Plumtree) & $\lceil \ln(N) \rceil + 2 = \mathbf{5}$ & $7 \dots 11$ & Pas de repli brutal (anti-oscillation) \\
+$< 12$ ($\le 11$) & Retour Full Mesh & $N - 1$ ($\le 11$ directs) & $0$ & Retour aux connexions directes \\
 \bottomrule
 \end{tabular}
 \end{center}

@@ -8,10 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="N0.IrohNet" Version="0.101.13" />
-  </ItemGroup>
-
-  <ItemGroup>
+    <ProjectReference Include="..\..\N0.IrohNet\N0.IrohNet\N0.IrohNet.csproj" />
     <ProjectReference Include="..\Whispernet.Core\Whispernet.Core.csproj" />
   </ItemGroup>
 

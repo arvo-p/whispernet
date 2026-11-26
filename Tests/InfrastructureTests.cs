@@ -19,14 +19,20 @@ public static class InfrastructureTests
         RunTest("1.2 Plumtree GOSSIP + PRUNE + Panne + IHAVE/GRAFT", TestPlumtreeBroadcastPruneAndCrashRecovery);
         RunTest("1.3 PeerCache Ordre LRU + Tolérance 5 échecs + Grace Fallback", TestPeerCacheOrderToleranceAndStaleFallback);
         RunTest("1.4 Anti-Îlots (PartitionHealTimer -> fusion de 2 îlots)", TestPartitionHealingAntiIslands);
+        RunTest("1.5 Topologie adaptative avec hystérésis (>16 Plumtree, <12 Full Mesh)", TestAdaptiveTopologyHysteresis);
+        RunTest("1.6 GroupGovernanceEngine (Manifest + LWW-CRDT + Moderation + Tombstone)", TestGroupGovernancePhase1);
+        RunTest("1.7 Governance DAG Replay + Demotion Rollback + Log Compaction", TestGovernanceDagReplayAndCompaction);
 
         // Niveau 2 : Intégration SQLite réelle et Comptes chiffrés (.App)
         await RunTestAsync("2.1 SqlitePeerCacheRepository (CRUD + Ordre + Purge)", TestSqlitePeerCacheRepositoryAsync);
         await RunTestAsync("2.2 AccountService + WhispernetPaths (ECDSA + PBKDF2 + AES-GCM)", TestAccountServiceAsync);
+        await RunTestAsync("2.3 GroupGovernanceService + GroupMeshService (Phase 2)", TestGroupGovernancePhase2Async);
 
         // Niveau 3 : Réseau réel Iroh QUIC + Mainline DHT (par NodeId seul)
-        await RunTestAsync("3.1 Iroh QUIC + Discovery All (DirectMeshService 1-to-1)", TestRealIrohMainlineDhtDirectMessagingAsync);
+        await RunTestAsync("3.1 Iroh QUIC + Discovery All (GroupMeshService 1-to-1)", TestRealIrohMainlineDhtDirectMessagingAsync);
         await RunTestAsync("3.2 Iroh QUIC + Mainline DHT SEULE (sans mDNS ni n0_dns)", TestRealIrohMainlineDhtIsolatedAsync);
+        await RunTestAsync("3.3 Invite Link (Mods-Only + Pre-Approval) + Live Iroh Join/Sync", TestLiveInvitationLinkAndPreApprovalAsync);
+        await RunTestAsync("3.4 ChatDAG Batched Topological Slice Sync (Stream 0x02, 500/batch)", TestLiveDagTopologicalSliceSyncAsync);
 
         Console.WriteLine("\nTOUS LES TESTS ONT RÉUSSI AVEC SUCCÈS !");
         return 0;
@@ -379,8 +385,8 @@ public static class InfrastructureTests
         using var aliceTransport = IrohEndpointAdapter.CreateAndBind(alpn: alpn, enableRelay: true, onlineTimeoutMs: 3000);
         using var bobTransport = IrohEndpointAdapter.CreateAndBind(alpn: alpn, enableRelay: true, onlineTimeoutMs: 3000);
 
-        var aliceDirect = new DirectMeshService(aliceTransport);
-        var bobDirect = new DirectMeshService(bobTransport);
+        var aliceDirect = new GroupMeshService(aliceTransport);
+        var bobDirect = new GroupMeshService(bobTransport);
 
         var bobReceivedTcs = new TaskCompletionSource<DirectChatMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
         bobDirect.MessageReceived += msg => bobReceivedTcs.TrySetResult(msg);
@@ -412,8 +418,8 @@ public static class InfrastructureTests
         using var bobTransport = IrohEndpointAdapter.CreateAndBind(
             alpn: alpn, enableRelay: true, onlineTimeoutMs: 5000, discoveryConfig: mainlineDhtOnly);
 
-        var aliceDirect = new DirectMeshService(aliceTransport);
-        var bobDirect = new DirectMeshService(bobTransport);
+        var aliceDirect = new GroupMeshService(aliceTransport);
+        var bobDirect = new GroupMeshService(bobTransport);
 
         var bobReceivedTcs = new TaskCompletionSource<DirectChatMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
         bobDirect.MessageReceived += msg => bobReceivedTcs.TrySetResult(msg);
@@ -515,6 +521,533 @@ public static class InfrastructureTests
                 Assert(service.VerifySignature(Convert.FromBase64String(bob.PublicKeySpkiBase64), msg, sig),
                     "Signature without password must be valid.");
             }
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot))
+            {
+                Directory.Delete(tempRoot, recursive: true);
+            }
+        }
+    }
+
+    private static void TestAdaptiveTopologyHysteresis()
+    {
+        var state = new HyParViewState(new NodeId("self"), NodeRole.Peer, HyParViewConfig.AdaptiveGroupDefaults);
+        var actions = new List<OutAction>();
+        var rng = new Random(42);
+
+        // 1. Add up to 16 peers -> stays in Full Mesh (<= 16)
+        for (int i = 1; i <= 16; i++)
+        {
+            state.ActiveView.Add(new NodeId($"p{i}"));
+        }
+        HyParViewEngine.TrimActiveViewToEffectiveCapacity(state, actions, rng);
+        Assert(!state.IsInPlumtreeOverlayMode, "At 16 online peers, must remain in Full Mesh.");
+        Assert(state.EffectiveMaxActiveViewSize == 16, "EffectiveMaxActiveViewSize must be 16 in Full Mesh.");
+        Assert(state.ActiveView.Count == 16, "All 16 peers must stay in ActiveView.");
+
+        // 2. 17th peer joins (> 16) -> switches to Plumtree ceil(ln(18)) + 2 = 5
+        state.ActiveView.Add(new NodeId("p17"));
+        HyParViewEngine.TrimActiveViewToEffectiveCapacity(state, actions, rng);
+        Assert(state.IsInPlumtreeOverlayMode, "At 17 online peers (>16), must switch to Plumtree overlay.");
+        Assert(state.EffectiveMaxActiveViewSize == 5, $"Expected ceil(ln(18))+2=5, got {state.EffectiveMaxActiveViewSize}.");
+        Assert(state.ActiveView.Count == 5, $"ActiveView must trim to 5, got {state.ActiveView.Count}.");
+        Assert(state.PassiveView.Count == 12, $"Excess 12 peers must move to PassiveView, got {state.PassiveView.Count}.");
+
+        // 3. Peers drop to 12 (hysteresis band 12..16) -> must STAY in Plumtree (no thrashing)
+        while (state.KnownOnlinePeersCount > 12)
+        {
+            NodeId toRemove = state.PassiveView.First();
+            state.PassiveView.Remove(toRemove);
+        }
+        HyParViewEngine.TrimActiveViewToEffectiveCapacity(state, actions, rng);
+        Assert(state.KnownOnlinePeersCount == 12, "Expected 12 online peers.");
+        Assert(state.IsInPlumtreeOverlayMode, "At 12 peers (not < 12), hysteresis must keep Plumtree mode.");
+
+        // 4. Peers drop below 12 (11 peers) -> collapses back to Full Mesh
+        state.PassiveView.Remove(state.PassiveView.First());
+        HyParViewEngine.TrimActiveViewToEffectiveCapacity(state, actions, rng);
+        Assert(state.KnownOnlinePeersCount == 11, "Expected 11 online peers.");
+        Assert(!state.IsInPlumtreeOverlayMode, "Below 12 peers (< 12), must collapse back to Full Mesh.");
+        Assert(state.EffectiveMaxActiveViewSize == 16, "EffectiveMaxActiveViewSize must return to 16.");
+    }
+
+    private static void TestGroupGovernancePhase1()
+    {
+        static bool VerifyEcdsa(ReadOnlySpan<byte> pubSpki, ReadOnlySpan<byte> data, ReadOnlySpan<byte> sig)
+        {
+            using var ecdsa = ECDsa.Create();
+            ecdsa.ImportSubjectPublicKeyInfo(pubSpki, out _);
+            return ecdsa.VerifyData(data, sig, HashAlgorithmName.SHA256);
+        }
+
+        static GroupManifest SignManifest(ECDsa ownerKey, GroupManifest unsignedManifest)
+        {
+            byte[] sig = ownerKey.SignData(unsignedManifest.BuildSignableBytes(), HashAlgorithmName.SHA256);
+            return unsignedManifest with { OwnerSignatureBase64 = Convert.ToBase64String(sig) };
+        }
+
+        static ModerationAction SignAction(ECDsa signerKey, ModerationAction unsignedAction)
+        {
+            byte[] sig = signerKey.SignData(unsignedAction.BuildSignableBytes(), HashAlgorithmName.SHA256);
+            return unsignedAction with { SignatureBase64 = Convert.ToBase64String(sig) };
+        }
+
+        using var ownerKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var modAKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var modBKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var userXKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+
+        byte[] ownerPub = ownerKey.ExportSubjectPublicKeyInfo();
+        byte[] modAPub = modAKey.ExportSubjectPublicKeyInfo();
+        byte[] modBPub = modBKey.ExportSubjectPublicKeyInfo();
+        byte[] userXPub = userXKey.ExportSubjectPublicKeyInfo();
+
+        GroupId groupId = GroupId.FromOwnerPublicKeySpki(ownerPub);
+        var modAId = new AuthorId(Convert.ToHexStringLower(SHA256.HashData(modAPub)));
+        var modBId = new AuthorId(Convert.ToHexStringLower(SHA256.HashData(modBPub)));
+        var userXId = new AuthorId(Convert.ToHexStringLower(SHA256.HashData(userXPub)));
+
+        var mods = new Dictionary<AuthorId, string>
+        {
+            [modAId] = Convert.ToBase64String(modAPub),
+            [modBId] = Convert.ToBase64String(modBPub)
+        };
+
+        GroupManifest v1 = SignManifest(ownerKey, new GroupManifest(
+            groupId, Convert.ToBase64String(ownerPub), Version: 1, "Dev Group",
+            IsPasswordProtected: false, null, null, null, IsTerminated: false,
+            mods, DateTimeOffset.UtcNow, string.Empty));
+
+        // 1. Reject forged manifest signed by a moderator instead of the Owner
+        var state = new GroupGovernanceState(v1);
+        GroupManifest forgedV2 = new(
+            groupId, Convert.ToBase64String(ownerPub), Version: 2, "Hijacked",
+            false, null, null, null, false, mods, DateTimeOffset.UtcNow,
+            Convert.ToBase64String(modAKey.SignData(
+                (v1 with { Version = 2, Title = "Hijacked" }).BuildSignableBytes(),
+                HashAlgorithmName.SHA256)));
+        Assert(!GroupGovernanceEngine.TryApplyManifest(state, forgedV2, VerifyEcdsa, out _),
+            "Moderator must not be able to forge a GroupManifest.");
+
+        // 2. Multi-moderator LWW convergence across out-of-order delivery
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        ModerationAction admitX = SignAction(modAKey, new ModerationAction(
+            groupId, 1, LamportClock: 1, userXId, Convert.ToBase64String(userXPub),
+            new NodeId("node_x"), MemberStatus.Admitted, modAId, "Approved", now, string.Empty));
+        ModerationAction silenceX = SignAction(modAKey, new ModerationAction(
+            groupId, 1, LamportClock: 2, userXId, Convert.ToBase64String(userXPub),
+            new NodeId("node_x"), MemberStatus.Silenced, modAId, "Spam", now.AddSeconds(1), string.Empty));
+        ModerationAction banX = SignAction(modBKey, new ModerationAction(
+            groupId, 1, LamportClock: 3, userXId, Convert.ToBase64String(userXPub),
+            new NodeId("node_x"), MemberStatus.Banned, modBId, "Abuse", now.AddSeconds(2), string.Empty));
+
+        var peer1State = new GroupGovernanceState(v1);
+        var peer2State = new GroupGovernanceState(v1);
+
+        // Peer 1 receives in order: admit -> silence -> ban
+        Assert(GroupGovernanceEngine.TryApplyModerationAction(peer1State, admitX, VerifyEcdsa, out _, out _), "peer1 admit");
+        Assert(GroupGovernanceEngine.CanAuthorPost(peer1State, userXId), "Admitted user must be able to post.");
+        Assert(GroupGovernanceEngine.TryApplyModerationAction(peer1State, silenceX, VerifyEcdsa, out _, out _), "peer1 silence");
+        Assert(!GroupGovernanceEngine.CanAuthorPost(peer1State, userXId) && GroupGovernanceEngine.CanAuthorReceive(peer1State, userXId),
+            "Silenced user cannot post but can receive.");
+        Assert(GroupGovernanceEngine.TryApplyModerationAction(peer1State, banX, VerifyEcdsa, out var banActions, out _), "peer1 ban");
+        Assert(!GroupGovernanceEngine.CanAuthorReceive(peer1State, userXId), "Banned user cannot receive.");
+        Assert(banActions.Any(a => a is OutAction.CloseConnection c && c.Target == new NodeId("node_x")),
+            "Ban must emit CloseConnection for target NodeId.");
+
+        // Peer 2 receives in reverse order: ban -> silence -> admit
+        Assert(GroupGovernanceEngine.TryApplyModerationAction(peer2State, banX, VerifyEcdsa, out _, out _), "peer2 ban");
+        Assert(GroupGovernanceEngine.TryApplyModerationAction(peer2State, silenceX, VerifyEcdsa, out _, out _), "peer2 silence");
+        Assert(GroupGovernanceEngine.TryApplyModerationAction(peer2State, admitX, VerifyEcdsa, out _, out _), "peer2 admit");
+
+        Assert(peer1State.GetMemberStatus(userXId) == MemberStatus.Banned, "Peer1 must converge to Banned.");
+        Assert(peer2State.GetMemberStatus(userXId) == MemberStatus.Banned, "Peer2 must converge to Banned.");
+        Assert(peer1State.ComputeModerationStateHash() == peer2State.ComputeModerationStateHash(),
+            "Both peers must converge to identical ModerationStateHash.");
+
+        // 3. Revoked moderator & termination tombstone
+        var modsWithoutB = new Dictionary<AuthorId, string> { [modAId] = Convert.ToBase64String(modAPub) };
+        GroupManifest v2 = SignManifest(ownerKey, v1 with { Version = 2, ModeratorPublicKeysSpkiBase64 = modsWithoutB });
+        Assert(GroupGovernanceEngine.TryApplyManifest(peer1State, v2, VerifyEcdsa, out _), "Owner v2 update must succeed.");
+
+        ModerationAction revokedAction = SignAction(modBKey, new ModerationAction(
+            groupId, 2, LamportClock: 4, userXId, Convert.ToBase64String(userXPub),
+            null, MemberStatus.Admitted, modBId, "Backdoor", now.AddSeconds(5), string.Empty));
+        Assert(!GroupGovernanceEngine.TryApplyModerationAction(peer1State, revokedAction, VerifyEcdsa, out _, out _),
+            "Revoked moderator must be rejected.");
+
+        GroupManifest v3Terminate = SignManifest(ownerKey, v2 with { Version = 3, IsTerminated = true });
+        Assert(GroupGovernanceEngine.TryApplyManifest(peer1State, v3Terminate, VerifyEcdsa, out _), "Termination must apply.");
+        GroupManifest v4Revive = SignManifest(ownerKey, v3Terminate with { Version = 4, IsTerminated = false });
+        Assert(!GroupGovernanceEngine.TryApplyManifest(peer1State, v4Revive, VerifyEcdsa, out _),
+            "Termination tombstone must be irreversible.");
+    }
+
+    private static void TestGovernanceDagReplayAndCompaction()
+    {
+        static bool VerifyEcdsa(ReadOnlySpan<byte> pubSpki, ReadOnlySpan<byte> data, ReadOnlySpan<byte> sig)
+        {
+            using var ecdsa = ECDsa.Create();
+            ecdsa.ImportSubjectPublicKeyInfo(pubSpki, out _);
+            return ecdsa.VerifyData(data, sig, HashAlgorithmName.SHA256);
+        }
+
+        static ModerationAction SignAction(ECDsa key, ModerationAction unsigned)
+        {
+            byte[] sig = key.SignData(unsigned.BuildSignableBytes(), HashAlgorithmName.SHA256);
+            return unsigned with { SignatureBase64 = Convert.ToBase64String(sig) };
+        }
+
+        using var groupKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var modBKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var aliceKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+
+        byte[] groupPub = groupKey.ExportSubjectPublicKeyInfo();
+        byte[] modBPub = modBKey.ExportSubjectPublicKeyInfo();
+        byte[] alicePub = aliceKey.ExportSubjectPublicKeyInfo();
+
+        GroupId groupId = GroupId.FromOwnerPublicKeySpki(groupPub);
+        var ownerAuthorId = new AuthorId(groupId.Value);
+        var modBId = new AuthorId(Convert.ToHexStringLower(SHA256.HashData(modBPub)));
+        var aliceId = new AuthorId(Convert.ToHexStringLower(SHA256.HashData(alicePub)));
+
+        var mods = new Dictionary<AuthorId, string> { [modBId] = Convert.ToBase64String(modBPub) };
+        var unsignedManifest = new GroupManifest(
+            groupId, Convert.ToBase64String(groupPub), 1, "DAG Mod Room",
+            false, null, null, null, false, mods, DateTimeOffset.UtcNow, string.Empty);
+        GroupManifest manifest = unsignedManifest with
+        {
+            OwnerSignatureBase64 = Convert.ToBase64String(groupKey.SignData(unsignedManifest.BuildSignableBytes(), HashAlgorithmName.SHA256))
+        };
+
+        DateTimeOffset t0 = DateTimeOffset.UtcNow;
+
+        // 1. ModB admits Alice at clock=1
+        ModerationAction admitAlice = SignAction(modBKey, new ModerationAction(
+            groupId, 1, LamportClock: 1, aliceId, Convert.ToBase64String(alicePub),
+            new NodeId("node_alice"), MemberStatus.Admitted, modBId, "Welcome", t0, string.Empty));
+
+        // 2. Owner demotes ModB at clock=2, while ModB goes rogue and bans Alice at clock=2 (even backdating IssuedAtUtc!)
+        ModerationAction demoteModB = SignAction(groupKey, new ModerationAction(
+            groupId, 1, LamportClock: 2, modBId, Convert.ToBase64String(modBPub),
+            null, MemberStatus.Unknown, ownerAuthorId, "Demoted", t0.AddSeconds(5), string.Empty,
+            Parents: new[] { admitAlice.ComputeActionId() },
+            Kind: GovernanceActionKind.DemoteModerator));
+
+        ModerationAction rogueBanAlice = SignAction(modBKey, new ModerationAction(
+            groupId, 1, LamportClock: 2, aliceId, Convert.ToBase64String(alicePub),
+            new NodeId("node_alice"), MemberStatus.Banned, modBId, "Rogue ban", t0.AddMinutes(-10), string.Empty,
+            Parents: new[] { admitAlice.ComputeActionId() },
+            Kind: GovernanceActionKind.MemberModeration));
+
+        // Peer receives admitAlice, THEN rogueBanAlice (before demotion arrives!)
+        var peerState = new GroupGovernanceState(manifest);
+        Assert(GroupGovernanceEngine.TryApplyModerationAction(peerState, admitAlice, VerifyEcdsa, out _, out _), "Admit failed");
+        Assert(GroupGovernanceEngine.TryApplyModerationAction(peerState, rogueBanAlice, VerifyEcdsa, out _, out _), "Rogue ban ingest failed");
+        Assert(peerState.GetMemberStatus(aliceId) == MemberStatus.Banned, "Before demotion arrives, Alice is temporarily Banned.");
+
+        // Now demoteModB arrives late -> DAG sorts demoteModB BEFORE rogueBanAlice -> rogueBanAlice is voided on replay!
+        Assert(GroupGovernanceEngine.TryApplyModerationAction(peerState, demoteModB, VerifyEcdsa, out _, out _), "Demote ingest failed");
+        Assert(peerState.GetMemberStatus(aliceId) == MemberStatus.Admitted,
+            "Late demotion must undo ModB's rogue ban and restore Alice to Admitted!");
+        Assert(!peerState.ActiveModerators.ContainsKey(modBId), "ModB must no longer be an active moderator.");
+
+        // 3. Test Log Compaction: add 60 newer actions and compact old superseded/voided ones
+        for (ulong c = 3; c <= 65; c++)
+        {
+            ModerationAction refresh = SignAction(groupKey, new ModerationAction(
+                groupId, 1, LamportClock: c, aliceId, Convert.ToBase64String(alicePub),
+                new NodeId("node_alice"), MemberStatus.Admitted, ownerAuthorId, "Refresh", t0.AddSeconds(c), string.Empty,
+                Parents: peerState.PrepareNextGovernanceContext().Parents));
+            Assert(GroupGovernanceEngine.TryApplyModerationAction(peerState, refresh, VerifyEcdsa, out _, out _), "Refresh failed");
+        }
+
+        string hashBeforeCompact = peerState.ComputeModerationStateHash();
+        int pruned = GroupGovernanceEngine.CompactGovernanceLog(peerState, recentWindow: 10);
+        Assert(pruned > 0, "CompactGovernanceLog must prune superseded/voided historical events.");
+        Assert(peerState.ComputeModerationStateHash() == hashBeforeCompact,
+            "Compaction must preserve the exact derived ModerationStateHash.");
+    }
+
+    // =========================================================================
+    // NIVEAU 2.3 : Gouvernance de groupe (.App) + Anti-Entropie + Repli Non-Ami
+    // =========================================================================
+    private static async Task TestGroupGovernancePhase2Async()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), $"whispernet_grp2_test_{Guid.NewGuid():N}");
+        try
+        {
+            var accountService = new AccountService(tempRoot);
+            var govService = new GroupGovernanceService(accountService);
+
+            AccountProfile aliceProf = await accountService.CreateAccountAsync("Alice", "AlicePwd!2026");
+            AccountProfile bobProf = await accountService.CreateAccountAsync("Bob", null);
+            AccountProfile charlieProf = await accountService.CreateAccountAsync("Charlie", null);
+            AccountProfile bob2Prof = await accountService.CreateAccountAsync("Bob2", null);
+
+            using AccountSession alice = await accountService.UnlockAccountAsync(aliceProf.AuthorId, "AlicePwd!2026");
+            using AccountSession bob = await accountService.UnlockAccountAsync(bobProf.AuthorId);
+            using AccountSession charlie = await accountService.UnlockAccountAsync(charlieProf.AuthorId);
+            using AccountSession bob2 = await accountService.UnlockAccountAsync(bob2Prof.AuthorId);
+
+            // 1. Alice creates two independent groups -> distinct GroupIds (dedicated per-group ECDSA P-256 keys)
+            GroupGovernanceState groupA = await govService.CreateGroupAsync(
+                alice, "Room Alpha", joinPassword: "JoinSecret!42", creatorNodeId: new NodeId("node_alice"));
+            GroupGovernanceState groupB = await govService.CreateGroupAsync(
+                alice, "Room Beta", joinPassword: null, creatorNodeId: new NodeId("node_alice"));
+
+            Assert(groupA.GroupId != groupB.GroupId, "Two groups by the same creator must have distinct GroupIds.");
+            Assert(groupA.GroupId.Value != aliceProf.AuthorId.Value, "GroupId must be independent of creator's AuthorId.");
+            Assert(groupA.GetMemberStatus(aliceProf.AuthorId) == MemberStatus.Admitted, "Creator must be Admitted.");
+
+            // Reload from encrypted vault
+            GroupGovernanceState reloadedA = await govService.LoadGroupFromVaultAsync(alice, groupA.GroupId);
+            Assert(reloadedA.CurrentManifest.Title == "Room Alpha", "Reloaded manifest title mismatch.");
+
+            // 2. JoinApprovalRequest with wrong/right password -> Pending queue -> Accept
+            JoinApprovalRequest badReq = govService.CreateJoinApprovalRequest(
+                bob, groupA.GroupId, new NodeId("node_bob"), joinPassword: "WrongPassword");
+            Assert(!govService.TryProcessJoinApprovalRequest(groupA, badReq, out _),
+                "Wrong group join password must be rejected.");
+
+            JoinApprovalRequest bobReq = govService.CreateJoinApprovalRequest(
+                bob, groupA.GroupId, new NodeId("node_bob"), joinPassword: "JoinSecret!42");
+            Assert(govService.TryProcessJoinApprovalRequest(groupA, bobReq, out _),
+                "Valid join request must be queued.");
+
+            JoinApprovalRequest charlieReq = govService.CreateJoinApprovalRequest(
+                charlie, groupA.GroupId, new NodeId("node_charlie"), joinPassword: "JoinSecret!42");
+            Assert(govService.TryProcessJoinApprovalRequest(groupA, charlieReq, out _),
+                "Charlie join request must be queued.");
+
+            Assert(govService.GetPendingJoinRequests(groupA.GroupId).Count == 2, "Expected 2 pending join requests.");
+
+            govService.AcceptPendingMember(alice, groupA, bobProf.AuthorId);
+            govService.AcceptPendingMember(alice, groupA, charlieProf.AuthorId);
+            Assert(govService.GetPendingJoinRequests(groupA.GroupId).Count == 0, "Pending queue must be empty after accept.");
+
+            // 3. Anti-entropy sync & non-friend fallback via GroupMeshService
+            using var aliceTransport = IrohEndpointAdapter.CreateAndBind("/whispernet/grp2-a/1", enableRelay: false, onlineTimeoutMs: 500);
+            using var charlieTransport = IrohEndpointAdapter.CreateAndBind("/whispernet/grp2-c/1", enableRelay: false, onlineTimeoutMs: 500);
+
+            var aliceMesh = new GroupMeshService(aliceTransport);
+            var charlieMesh = new GroupMeshService(charlieTransport);
+
+            aliceMesh.RegisterGroup(groupA);
+            GroupRosterSyncPayload syncPayload = aliceMesh.BuildSyncPayload(groupA.GroupId);
+            Assert(charlieMesh.ApplySyncPayload(syncPayload, accountService.VerifySignature, out string? syncErr),
+                $"Charlie sync failed: {syncErr}");
+
+            // Charlie has 0 online friends -> falls back to non-friend Admitted room members (Alice & Bob)
+            IReadOnlyList<NodeId> fallbackTargets = charlieMesh.GetReconnectTargets(groupA.GroupId, onlineFriends: Array.Empty<NodeId>());
+            Assert(fallbackTargets.Contains(new NodeId("node_alice")) && fallbackTargets.Contains(new NodeId("node_bob")),
+                "Zero-friends fallback must return Admitted non-friend room EndpointIds.");
+
+            // 4. Multi-group QUIC ref-counting: Bob is in both groupA and groupB
+            ModerationAction admitBobInB = govService.SignModerationAction(
+                alice, groupB, bobProf.AuthorId, bobProf.PublicKeySpkiBase64, MemberStatus.Admitted, "Welcome", new NodeId("node_bob"));
+            Assert(GroupGovernanceEngine.TryApplyModerationAction(groupB, admitBobInB, accountService.VerifySignature, out _, out _),
+                "Admit Bob in groupB failed.");
+            aliceMesh.RegisterGroup(groupB);
+
+            Assert(!aliceMesh.ShouldClosePhysicalConnection(new NodeId("node_bob"), groupA.GroupId.Value),
+                "Must NOT close physical QUIC link to Bob while groupB still uses it.");
+
+            // 5. Ban Bob1 & reject new account Bob2 (Unknown) + Silenced hop-1 filtering
+            ModerationAction silenceCharlie = govService.SignModerationAction(
+                alice, groupA, charlieProf.AuthorId, charlieProf.PublicKeySpkiBase64, MemberStatus.Silenced, "Cooldown", new NodeId("node_charlie"));
+            Assert(GroupGovernanceEngine.TryApplyModerationAction(groupA, silenceCharlie, accountService.VerifySignature, out _, out _),
+                "Silence Charlie failed.");
+            Assert(!aliceMesh.CanAcceptGroupPost(groupA.GroupId, charlieProf.AuthorId, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow),
+                "Silenced author post must be rejected.");
+
+            ModerationAction banBob = govService.SignModerationAction(
+                alice, groupA, bobProf.AuthorId, bobProf.PublicKeySpkiBase64, MemberStatus.Banned, "Ban", new NodeId("node_bob"));
+            Assert(GroupGovernanceEngine.TryApplyModerationAction(groupA, banBob, accountService.VerifySignature, out _, out _),
+                "Ban Bob failed.");
+            Assert(!aliceMesh.CanAcceptGroupPost(groupA.GroupId, bobProf.AuthorId, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow),
+                "Banned author post must be rejected.");
+            Assert(!aliceMesh.CanAcceptGroupPost(groupA.GroupId, bob2Prof.AuthorId, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow),
+                "Unknown new account Bob2 must be rejected.");
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot))
+            {
+                Directory.Delete(tempRoot, recursive: true);
+            }
+        }
+    }
+
+    private static async Task TestLiveInvitationLinkAndPreApprovalAsync()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), $"whispernet_inv_test_{Guid.NewGuid():N}");
+        try
+        {
+            var accountService = new AccountService(tempRoot);
+            var govService = new GroupGovernanceService(accountService);
+
+            AccountProfile aliceProf = await accountService.CreateAccountAsync("Alice", null);
+            AccountProfile bobProf = await accountService.CreateAccountAsync("Bob", null);
+            using AccountSession alice = await accountService.UnlockAccountAsync(aliceProf.AuthorId);
+            using AccountSession bob = await accountService.UnlockAccountAsync(bobProf.AuthorId);
+
+            const string alpn = "/whispernet/invite-test/1";
+            using var aliceTransport = IrohEndpointAdapter.CreateAndBind(alpn: alpn, enableRelay: true, onlineTimeoutMs: 3000);
+            using var bobTransport = IrohEndpointAdapter.CreateAndBind(alpn: alpn, enableRelay: true, onlineTimeoutMs: 3000);
+
+            GroupGovernanceState aliceGroup = await govService.CreateGroupAsync(
+                alice, "VIP Room", joinPassword: null, creatorNodeId: aliceTransport.SelfId);
+
+            // 1. Non-moderator (Bob) cannot create an invitation link
+            bool nonModRejected = false;
+            try
+            {
+                govService.CreateInvitationLink(bob, aliceGroup, bobTransport.SelfId);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                nonModRejected = true;
+            }
+            Assert(nonModRejected, "Non-moderator must be blocked from creating invitation links.");
+
+            // 2. Moderator (Alice) creates a pre-approved invite link for Bob
+            string inviteLink = govService.CreateInvitationLink(
+                alice, aliceGroup, aliceTransport.SelfId, preApprove: true, targetAuthorId: bobProf.AuthorId);
+            Assert(inviteLink.StartsWith("whispernet://invite/", StringComparison.Ordinal), "Invalid invite link prefix.");
+
+            var aliceMesh = new GroupMeshService(aliceTransport);
+            var bobMesh = new GroupMeshService(bobTransport);
+            aliceMesh.RegisterGroup(aliceGroup);
+
+            var bobSyncedTcs = new TaskCompletionSource<GroupRosterSyncPayload>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var aliceChatTcs = new TaskCompletionSource<DirectChatMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            aliceMesh.JoinRequestReceived += req =>
+            {
+                if (govService.TryProcessJoinApprovalRequest(aliceGroup, req, out _, out ModerationAction? autoAdmitted, alice) &&
+                    autoAdmitted is not null)
+                {
+                    aliceMesh.RegisterGroup(aliceGroup);
+                    _ = aliceMesh.SendSyncPayloadAsync(req.RequesterNodeId, aliceMesh.BuildSyncPayload(aliceGroup.GroupId));
+                }
+            };
+            aliceMesh.MessageReceived += msg => aliceChatTcs.TrySetResult(msg);
+
+            bobMesh.RosterSyncReceived += sync =>
+            {
+                if (bobMesh.ApplySyncPayload(sync, accountService.VerifySignature, out _))
+                {
+                    bobSyncedTcs.TrySetResult(sync);
+                }
+            };
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+            aliceTransport.StartAcceptLoop(aliceMesh.HandleIncomingPayload, cts.Token);
+            bobTransport.StartAcceptLoop(bobMesh.HandleIncomingPayload, cts.Token);
+
+            // 3. Bob parses the link, sends JoinApprovalRequest over live QUIC, gets auto-admitted & synced
+            GroupInvitationData parsed = GroupGovernanceService.ParseInvitationLink(inviteLink);
+            JoinApprovalRequest bobReq = govService.CreateJoinApprovalRequest(
+                bob, parsed.GroupId, bobTransport.SelfId, preApprovalTicket: parsed.PreApprovalTicket);
+            await bobMesh.SendJoinRequestAsync(parsed.BootstrapNodeId, bobReq, cts.Token);
+
+            GroupRosterSyncPayload synced = await bobSyncedTcs.Task.WaitAsync(TimeSpan.FromSeconds(15), cts.Token);
+            Assert(synced.Manifest.Title == "VIP Room", "Synced manifest title mismatch.");
+            Assert(aliceGroup.GetMemberStatus(bobProf.AuthorId) == MemberStatus.Admitted, "Bob must be auto-admitted.");
+
+            // 4. Bob sends a governed chat message to Alice
+            await bobMesh.SendMessageAsync(parsed.GroupId.Value, "Bob", "Thanks for the pre-approved invite!", cts.Token, bobProf.AuthorId);
+            DirectChatMessage received = await aliceChatTcs.Task.WaitAsync(TimeSpan.FromSeconds(10), cts.Token);
+            Assert(received.Content == "Thanks for the pre-approved invite!", "Chat message content mismatch.");
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot))
+            {
+                Directory.Delete(tempRoot, recursive: true);
+            }
+        }
+    }
+
+    private static async Task TestLiveDagTopologicalSliceSyncAsync()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), $"whispernet_dagsync_test_{Guid.NewGuid():N}");
+        try
+        {
+            var accountService = new AccountService(tempRoot);
+            var chatEventService = new ChatEventService(accountService);
+
+            AccountProfile aliceProf = await accountService.CreateAccountAsync("Alice", null);
+            AccountProfile bobProf = await accountService.CreateAccountAsync("Bob", null);
+            using AccountSession alice = await accountService.UnlockAccountAsync(aliceProf.AuthorId);
+            using AccountSession bob = await accountService.UnlockAccountAsync(bobProf.AuthorId);
+
+            using var groupKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+            GroupId groupId = GroupId.FromOwnerPublicKeySpki(groupKey.ExportSubjectPublicKeyInfo());
+            byte[] roomIdBytes = Convert.FromHexString(groupId.Value);
+
+            var aliceDag = new ChatRoomDagState(roomIdBytes);
+            var bobDag = new ChatRoomDagState(roomIdBytes);
+
+            ulong t0 = (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            // Shared prefix E1 -> E2 on both Alice and Bob
+            ChatEvent e1 = chatEventService.CreateSignedEvent(alice, roomIdBytes, Array.Empty<byte[]>(), 1, t0 + 1, "E1");
+            ChatEvent e2 = chatEventService.CreateSignedEvent(bob, roomIdBytes, new[] { e1.EventId }, 2, t0 + 2, "E2");
+            Assert(chatEventService.TryIngestEvent(aliceDag, e1, out _), "Alice E1");
+            Assert(chatEventService.TryIngestEvent(aliceDag, e2, out _), "Alice E2");
+            Assert(chatEventService.TryIngestEvent(bobDag, e1, out _), "Bob E1");
+            Assert(chatEventService.TryIngestEvent(bobDag, e2, out _), "Bob E2");
+
+            // Alice goes offline while Bob creates 1,050 new events (3 batches: 500 + 500 + 50)
+            for (int i = 0; i < 1050; i++)
+            {
+                (IReadOnlyList<byte[]> parents, ulong nextClock) = ChatDagEngine.PrepareNextEventCausalContext(bobDag);
+                ChatEvent next = chatEventService.CreateSignedEvent(
+                    bob, roomIdBytes, parents, nextClock, t0 + (ulong)(10 + i), $"Msg-{i}");
+                Assert(chatEventService.TryIngestEvent(bobDag, next, out string? err), $"Bob ingest {i}: {err}");
+            }
+            Assert(bobDag.SortedHistory.Count == 1052, "Bob must have 1052 events.");
+
+            const string alpn = "/whispernet/dag-sync-test/1";
+            using var aliceTransport = IrohEndpointAdapter.CreateAndBind(alpn: alpn, enableRelay: true, onlineTimeoutMs: 3000);
+            using var bobTransport = IrohEndpointAdapter.CreateAndBind(alpn: alpn, enableRelay: true, onlineTimeoutMs: 3000);
+
+            var aliceMesh = new GroupMeshService(aliceTransport);
+            var bobMesh = new GroupMeshService(bobTransport);
+
+            var syncCompletedTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            int receivedBatches = 0;
+
+            bobMesh.DagSyncRequestReceived += req =>
+            {
+                _ = bobMesh.StreamTopologicalSliceAsync(req.RequesterNodeId, req.GroupId, bobDag, req.KnownHeadIds);
+            };
+
+            aliceMesh.DagSyncBatchReceived += batch =>
+            {
+                Assert(chatEventService.TryIngestBatch(aliceDag, batch.Events, out string? err), $"Alice batch ingest: {err}");
+
+                if (Interlocked.Increment(ref receivedBatches) == batch.TotalBatches)
+                {
+                    syncCompletedTcs.TrySetResult(true);
+                }
+            };
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            aliceTransport.StartAcceptLoop(aliceMesh.HandleIncomingPayload, cts.Token);
+            bobTransport.StartAcceptLoop(bobMesh.HandleIncomingPayload, cts.Token);
+
+            // Alice sends only her HeadIds ([E2]) over stream 0x02
+            await aliceMesh.SendDagSyncRequestAsync(bobTransport.SelfId, groupId, aliceDag, cts.Token);
+            await syncCompletedTcs.Task.WaitAsync(TimeSpan.FromSeconds(20), cts.Token);
+
+            Assert(receivedBatches == 3, $"Expected 3 batches (500+500+50), got {receivedBatches}.");
+            Assert(aliceDag.SortedHistory.Count == 1052, $"Expected 1052 events on Alice, got {aliceDag.SortedHistory.Count}.");
+            Assert(aliceDag.SortedHistory[^1].EventIdHex == bobDag.SortedHistory[^1].EventIdHex,
+                "Alice and Bob must converge to identical DAG head.");
         }
         finally
         {

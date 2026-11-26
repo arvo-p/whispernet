@@ -50,7 +50,7 @@ Cette commande exécute successivement les **3 niveaux de tests** ([Infrastructu
    - `1.4 Anti-Îlots` : fusion de deux partitions réseau isolées (`{A, B, C}` et `{D, E, F}`) déclenchée par `PartitionHealTimer`.
 2. **Niveau 2 — Persistance SQLite réelle (`Whispernet.App`)** :
    - `2.1 SqlitePeerCacheRepository` : création de la table `peer_cache`, insertions/mises à jour transactionnelles, ordre de lecture SQL et purge protégeant les `MeetingPoint`.
-3. **Niveau 3 — Réseau réel Iroh QUIC + Mainline DHT (`Whispernet.Transport.Iroh` + `DirectMeshService`)** :
+3. **Niveau 3 — Réseau réel Iroh QUIC + Mainline DHT (`Whispernet.Transport.Iroh` + `GroupMeshService`)** :
    - `3.1` : `Alice` et `Bob` démarrent deux vrais endpoints Iroh (`DiscoveryConfig.DISCOVERY_CONFIG_ALL`) et s'envoient un message 1-to-1 **uniquement par `NodeId` (sans ticket)** via `ConnectSmartAsync` et un vrai stream QUIC.
 
 ---
