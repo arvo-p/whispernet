@@ -3,7 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Whispernet.Core;
 
-namespace Whispernet.App;
+namespace Whispernet.App.Messaging;
 
 /// <summary>
 /// Gestionnaire de comptes locaux Whispernet avec identité ECDSA P-256,

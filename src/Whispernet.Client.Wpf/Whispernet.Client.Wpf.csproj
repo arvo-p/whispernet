@@ -10,7 +10,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\Whispernet.App\Whispernet.App.csproj" />
+    <ProjectReference Include="..\Whispernet.App.Messaging\Whispernet.App.Messaging.csproj" />
   </ItemGroup>
 
 </Project>

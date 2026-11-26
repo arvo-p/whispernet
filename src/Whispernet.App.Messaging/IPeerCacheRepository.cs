@@ -1,6 +1,6 @@
 using Whispernet.Core;
 
-namespace Whispernet.App;
+namespace Whispernet.App.Messaging;
 
 /// <summary>
 /// Contrat de persistance du cache de pairs (Peer Cache) permettant à un nœud

@@ -3,7 +3,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using Whispernet.Core;
 
-namespace Whispernet.App;
+namespace Whispernet.App.Messaging;
 
 /// <summary>
 /// Implémentation SQLite native multiplateforme (Windows / Linux / Raspberry Pi) de <see cref="IPeerCacheRepository"/>.

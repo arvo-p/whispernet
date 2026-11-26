@@ -142,7 +142,7 @@
 \end{titlepage}
 
 \begin{pedagogie}{Objectif du document}
-    Ce document constitue le \textbf{Plan d'implémentation 1.0} de la couche de diffusion pair-à-pair de \textbf{Whispernet}. Il a pour but d'organiser et de structurer les différentes tâches à réaliser — qui seront assignées aux collaborateurs par la suite. \textbf{La lecture de la section Introduction est la seule obligatoire pour tout le monde (en plus de la section qui vous sera assignée)}. Les autres sections techniques s'adressent uniquement aux personnes concernées par les couches correspondantes.
+    Ce document constitue le \textbf{Plan d'implémentation 1.0} de la couche de diffusion pair-à-pair de \textbf{Whispernet}. Il a pour but d'organiser et de structurer les différentes tâches à réaliser — qui seront assignées par la suite. \textbf{La lecture de la section Introduction est la seule que tous doivent lire (en plus de la section assignée)}. Les autres sections techniques s'adressent uniquement aux personnes concernées par les couches correspondantes.
 \end{pedagogie}
 
 \tableofcontents
@@ -167,9 +167,9 @@ La solution \texttt{Whispernet.slnx} est découpée en projets C\# distincts (\e
 \midrule
 \texttt{src/Whispernet.Core} & Library (\texttt{net10.0}) & Couche protocole pure \textbf{Sans-I/O} (HyParView + Plumtree). Zéro dépendance réseau ou UI. \\
 \texttt{src/Whispernet.Transport.Iroh} & Library (\texttt{net10.0}) & Adaptateur réseau Iroh QUIC (\texttt{N0.IrohNet}). Exécute les \texttt{OutAction} de \texttt{Core} et gère les timers. \\
-\texttt{src/Whispernet.App} & Library (\texttt{net10.0}) & Logique applicative partagée et \emph{ViewModels} (salons, historique, commandes), indépendante de l'UI. \\
-\texttt{src/Whispernet.Client.Wpf} & WinExe (\texttt{net10.0-windows}) & Interface graphique \textbf{WPF} pour Windows (100\,\% visuelle, liée à \texttt{Whispernet.App}). \\
-\texttt{src/Whispernet.Client.Linux} & Exe (\texttt{net10.0}) & Interface utilisateur pour Linux (100\,\% visuelle, liée à \texttt{Whispernet.App}). \\
+\texttt{src/Whispernet.App.Messaging} & Library (\texttt{net10.0}) & Logique applicative partagée et \emph{ViewModels} (salons, historique, commandes), indépendante de l'UI. \\
+\texttt{src/Whispernet.Client.Wpf} & WinExe (\texttt{net10.0-windows}) & Interface graphique \textbf{WPF} pour Windows (100\,\% visuelle, liée à \texttt{Whispernet.App.Messaging}). \\
+\texttt{src/Whispernet.Client.Linux} & Exe (\texttt{net10.0}) & Interface utilisateur pour Linux (100\,\% visuelle, liée à \texttt{Whispernet.App.Messaging}). \\
 \texttt{src/Whispernet.MeetingNode} & Exe (\texttt{net10.0}) & Binaire terminal léger 24h/24 pour \textbf{Raspberry Pi / Linux} (utilise \texttt{Core} + \texttt{Transport.Iroh}). \\
 \texttt{Tests/} & Exe (\texttt{net10.0}) & Prototype fonctionnel de test de messagerie de groupe P2P (\texttt{demo}, \texttt{host}, \texttt{join}). \\
 \texttt{Rapports/} & Documentation & Rapports d'architecture et présent \emph{Plan d'implémentation 1.0}. \\
@@ -194,7 +194,7 @@ La solution \texttt{Whispernet.slnx} est découpée en projets C\# distincts (\e
 
     % Couche App (sous les deux UI)
     \coordinate (midui) at ($(wpf.south)!0.5!(lin.south)$);
-    \node[lib, below=0.9cm of midui] (app) {\textbf{Whispernet.App}\\\scriptsize Logique applicative \& ViewModels (sans UI)};
+    \node[lib, below=0.9cm of midui] (app) {\textbf{Whispernet.App.Messaging}\\\scriptsize Logique applicative \& ViewModels (sans UI)};
 
     % Couche Transport
     \node[lib, below=0.9cm of app, xshift=1.8cm] (trans) {\textbf{Whispernet.Transport.Iroh}\\\scriptsize Adaptateur réseau Iroh QUIC \& Timers};
@@ -216,7 +216,7 @@ La solution \texttt{Whispernet.slnx} est découpée en projets C\# distincts (\e
 \begin{pedagogie}{Travailler en parallèle sans se marcher sur les pieds}
 Grâce à cette séparation :
 \begin{itemize}
-    \item Les développeurs \textbf{UI Windows (WPF)} et \textbf{UI Linux} travaillent chacun dans leur projet (\texttt{Client.Wpf} / \texttt{Client.Linux}) en consommant simplement \texttt{Whispernet.App}, sans jamais toucher au code réseau.
+    \item Les développeurs \textbf{UI Windows (WPF)} et \textbf{UI Linux} travaillent chacun dans leur projet (\texttt{Client.Wpf} / \texttt{Client.Linux}) en consommant simplement \texttt{Whispernet.App.Messaging}, sans jamais toucher au code réseau.
     \item Les développeurs \textbf{P2P / Protocole} implémentent HyParView et Plumtree dans \texttt{Whispernet.Core} de manière 100\,\% testable en mémoire.
     \item L'exécutable \textbf{Raspberry Pi (\texttt{MeetingNode})} réutilise directement \texttt{Core} et \texttt{Transport.Iroh} sans embarquer aucune dépendance graphique.
 \end{itemize}
@@ -249,7 +249,7 @@ Sur GitHub, un bandeau \textbf{Compare \& pull request} apparaît alors automati
 Chaque rôle correspond à un projet C\# précis, ce qui évite que deux personnes modifient les mêmes fichiers :
 \begin{itemize}
     \item \textbf{Équipe P2P} $\rightarrow$ \texttt{src/Whispernet.Core/} et \texttt{src/Whispernet.Transport.Iroh/}
-    \item \textbf{Couche applicative partagée (ViewModels / Contrats)} $\rightarrow$ \texttt{src/Whispernet.App/}
+    \item \textbf{Couche applicative partagée (ViewModels / Contrats)} $\rightarrow$ \texttt{src/Whispernet.App.Messaging/}
     \item \textbf{Équipe UI Windows (WPF)} $\rightarrow$ \texttt{src/Whispernet.Client.Wpf/}
     \item \textbf{Équipe UI Linux} $\rightarrow$ \texttt{src/Whispernet.Client.Linux/}
     \item \textbf{Équipe Raspberry Pi} $\rightarrow$ \texttt{src/Whispernet.MeetingNode/}
@@ -257,7 +257,7 @@ Chaque rôle correspond à un projet C\# précis, ce qui évite que deux personn
 Tant que chacun reste dans son périmètre, Git saura fusionner vos branches automatiquement sans conflit.
 
 \subsubsection*{3. S'accorder d'abord sur les « contrats » (interfaces publiques)}
-Pour que l'interface graphique et la couche réseau puissent avancer en même temps sans s'attendre l'une l'autre, il faut figer très tôt les \textbf{contrats} entre les couches — c'est-à-dire les interfaces C\# et les types échangés dans \texttt{Whispernet.Core} et \texttt{Whispernet.App} (par exemple \texttt{SendMessage()}, \texttt{OnMessageReceived}, \texttt{OutAction}).
+Pour que l'interface graphique et la couche réseau puissent avancer en même temps sans s'attendre l'une l'autre, il faut figer très tôt les \textbf{contrats} entre les couches — c'est-à-dire les interfaces C\# et les types échangés dans \texttt{Whispernet.Core} et \texttt{Whispernet.App.Messaging} (par exemple \texttt{SendMessage()}, \texttt{OnMessageReceived}, \texttt{OutAction}).
 
 Une fois ces signatures validées et mergées sur \texttt{main}, l'équipe WPF ou Linux peut construire toute son interface (en simulant des messages factices pour tester l'affichage) pendant que l'équipe P2P implémente HyParView et Plumtree en parallèle.
 
@@ -272,8 +272,30 @@ Le \texttt{rebase} réapplique vos commits par-dessus le \texttt{main} le plus r
 \subsubsection*{5. Garder le dépôt propre (éviter les fichiers générés)}
 \begin{itemize}
     \item \textbf{Ne forcez jamais l'ajout des dossiers \texttt{bin/}, \texttt{obj/}} ni des fichiers temporaires d'éditeur: le fichier \texttt{.gitignore} est là pour les exclure automatiquement, car chaque machine les régénère lors du \texttt{dotnet build}.
-    \item \textbf{Attention aux fichiers partagés} : \texttt{Whispernet.slnx} et les \texttt{.csproj} communs (\texttt{Whispernet.App.csproj}) ne doivent être modifiés que lorsque c'est réellement nécessaire (ajout d'un nouveau projet ou d'une dépendance NuGet).
+    \item \textbf{Attention aux fichiers partagés} : \texttt{Whispernet.slnx} et les \texttt{.csproj} communs (\texttt{Whispernet.App.Messaging.csproj}) ne doivent être modifiés que lorsque c'est réellement nécessaire (ajout d'un nouveau projet ou d'une dépendance NuGet).
 \end{itemize}
+
+\subsubsection*{6. Ouvrir une Pull Request (PR) pour merger une partie opérationnelle}
+Dès qu'une fonctionnalité compile et fonctionne correctement, suivez ces 4 étapes pour l'intégrer proprement dans \texttt{main} :
+\begin{enumerate}
+    \item \textbf{Vérifier que tout est vert localement} : lancez la compilation et la suite complète de tests avant de pousser :
+\begin{lstlisting}
+dotnet build src/Whispernet.Client.Linux/Whispernet.Client.Linux.csproj
+dotnet run --project Tests/Whispernet.csproj -- test-all
+\end{lstlisting}
+    \item \textbf{Synchroniser et pousser sa branche} :
+\begin{lstlisting}
+git fetch origin && git rebase origin/main
+git push -u origin <votre-branche>
+\end{lstlisting}
+    \item \textbf{Créer la Pull Request sur GitHub} :
+    \begin{itemize}
+        \item Sur le dépôt GitHub, cliquez sur \textbf{Compare \& pull request} (base : \texttt{main} $\leftarrow$ compare : \texttt{<votre-branche>}).
+        \item Rédigez un titre explicite (ex. \texttt{feat(app): création de compte chiffrée}), listez les fichiers modifiés et indiquez que \texttt{test-all} passe.
+        \item Assignez au moins un coéquipier en \emph{Reviewer} pour valider le diff.
+    \end{itemize}
+    \item \textbf{Merger et nettoyer} : une fois la PR approuvée, cliquez sur \textbf{Squash and merge} (ou \textbf{Rebase and merge}), supprimez la branche sur GitHub puis localement (\texttt{git checkout main \&\& git pull \&\& git branch -d <votre-branche>}).
+\end{enumerate}
 
 \newpage
 
@@ -754,9 +776,9 @@ Par conséquent, \textbf{la DHT ne transporte jamais les messages du chat} : ell
 
 À chaque expiration du \texttt{PartitionHealTimer} (toutes les 3 minutes), \texttt{ProbeForPartitionHeal} choisit un \emph{Pair Pont} absent de l'îlot courant (un \texttt{MeetingPoint} non connecté ou un pair du cache absent de \texttt{SeenNodesInCurrentEpoch}), le résout via la Mainline DHT et lui envoie un \texttt{JOIN} ou un \texttt{SHUFFLE} : les deux Vues Passives s'échangent et les îlots fusionnent automatiquement.
 
-\section{Couche Applicative (\texttt{Whispernet.App})}
+\section{Couche Applicative (\texttt{Whispernet.App.Messaging})}
 
-La couche \texttt{Whispernet.App} sépare explicitement l'\textbf{identité réseau} d'un appareil (\texttt{NodeId} Ed25519 géré par Iroh pour le transport QUIC) de l'\textbf{identité d'auteur} de l'utilisateur (\texttt{AuthorId}), tout en assurant la protection cryptographique des comptes locaux et de leurs fichiers.
+La couche \texttt{Whispernet.App.Messaging} sépare explicitement l'\textbf{identité réseau} d'un appareil (\texttt{NodeId} Ed25519 géré par Iroh pour le transport QUIC) de l'\textbf{identité d'auteur} de l'utilisateur (\texttt{AuthorId}), tout en assurant la protection cryptographique des comptes locaux et de leurs fichiers.
 
 \subsection{Création de compte et identité d'auteur}
 

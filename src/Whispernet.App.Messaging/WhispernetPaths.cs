@@ -1,6 +1,6 @@
 using Whispernet.Core;
 
-namespace Whispernet.App;
+namespace Whispernet.App.Messaging;
 
 /// <summary>
 /// Résolution centralisée et multiplateforme des répertoires de données Whispernet.

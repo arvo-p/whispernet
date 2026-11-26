@@ -212,7 +212,7 @@ public abstract record OutAction
     /// <summary>Demande l'envoi d'un message protocolaire à Target.</summary>
     public sealed record Send(NodeId Target, NetworkMessage Message) : OutAction;
 
-    /// <summary>Livre un message applicatif reçu à la couche supérieure (Whispernet.App).</summary>
+    /// <summary>Livre un message applicatif reçu à la couche supérieure (Whispernet.App.Messaging).</summary>
     public sealed record DeliverToApp(MsgId MessageId, byte[] Payload) : OutAction;
 
     /// <summary>Démarre ou redémarre un timer pour la durée indiquée.</summary>

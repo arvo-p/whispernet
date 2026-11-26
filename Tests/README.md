@@ -1,7 +1,7 @@
 # Whispernet — Suite de Tests & Prototype P2P
 
 Ce répertoire regroupe :
-1. **La suite de tests complète (`test-all`)** validant l'infrastructure **Whispernet** (`Whispernet.Core`, `Whispernet.Transport.Iroh`, `Whispernet.App`) sur 3 niveaux (Sans-I/O, SQLite, Iroh QUIC + Mainline DHT).
+1. **La suite de tests complète (`test-all`)** validant l'infrastructure **Whispernet** (`Whispernet.Core`, `Whispernet.Transport.Iroh`, `Whispernet.App.Messaging`) sur 3 niveaux (Sans-I/O, SQLite, Iroh QUIC + Mainline DHT).
 2. **Le prototype interactif de messagerie de groupe P2P** (`demo`, `host`, `join`) basé sur [N0.IrohNet](https://www.nuget.org/packages/N0.IrohNet).
 
 > **Note sur les binaires natifs Mainline DHT :**
@@ -48,7 +48,7 @@ Cette commande exécute successivement les **3 niveaux de tests** ([Infrastructu
    - `1.2 Plumtree` : diffusion `GOSSIP`, élagage des doublons (`PRUNE`), panne brutale d'un relais (`OnConnectionLost`) et auto-réparation via `IHAVE` + `IHaveTimer` + `GRAFT`.
    - `1.3 PeerCache` : tri de priorité (`MeetingPoint` $\rightarrow$ pairs récents/fidèles $\rightarrow$ anciens $\rightarrow$ probation), tolérance de 5 échecs consécutifs, immunité des `MeetingPoint`, et *Grace Fallback* sur historique périmé (`> 7 jours`).
    - `1.4 Anti-Îlots` : fusion de deux partitions réseau isolées (`{A, B, C}` et `{D, E, F}`) déclenchée par `PartitionHealTimer`.
-2. **Niveau 2 — Persistance SQLite réelle (`Whispernet.App`)** :
+2. **Niveau 2 — Persistance SQLite réelle (`Whispernet.App.Messaging`)** :
    - `2.1 SqlitePeerCacheRepository` : création de la table `peer_cache`, insertions/mises à jour transactionnelles, ordre de lecture SQL et purge protégeant les `MeetingPoint`.
 3. **Niveau 3 — Réseau réel Iroh QUIC + Mainline DHT (`Whispernet.Transport.Iroh` + `GroupMeshService`)** :
    - `3.1` : `Alice` et `Bob` démarrent deux vrais endpoints Iroh (`DiscoveryConfig.DISCOVERY_CONFIG_ALL`) et s'envoient un message 1-to-1 **uniquement par `NodeId` (sans ticket)** via `ConnectSmartAsync` et un vrai stream QUIC.

@@ -12,7 +12,7 @@
     <ProjectReference Include="..\N0.IrohNet\N0.IrohNet\N0.IrohNet.csproj" />
     <ProjectReference Include="..\src\Whispernet.Core\Whispernet.Core.csproj" />
     <ProjectReference Include="..\src\Whispernet.Transport.Iroh\Whispernet.Transport.Iroh.csproj" />
-    <ProjectReference Include="..\src\Whispernet.App\Whispernet.App.csproj" />
+    <ProjectReference Include="..\src\Whispernet.App.Messaging\Whispernet.App.Messaging.csproj" />
   </ItemGroup>
 
   <Target Name="OverrideIrohNativeWithMainlineDht" AfterTargets="Build">

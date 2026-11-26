@@ -1,11 +1,11 @@
 using System.Text;
 using Whispernet.Core;
 
-namespace Whispernet.App;
+namespace Whispernet.App.Messaging;
 
 /// <summary>
 /// Service applicatif reliant la signature ECDSA P-256 des comptes (<see cref="AccountSession"/>)
-/// au moteur de DAG causal (<see cref="ChatDagEngine"/>).
+/// au moteur de DAG causal (<see cref="CausalDagEngine"/>).
 /// </summary>
 public sealed class ChatEventService
 {
@@ -57,7 +57,7 @@ public sealed class ChatEventService
     /// </summary>
     public bool TryIngestEvent(ChatRoomDagState roomState, ChatEvent evt, out string? error)
     {
-        return ChatDagEngine.TryIngestEvent(
+        return CausalDagEngine.TryIngestEvent(
             roomState,
             evt,
             _accountService.VerifySignature,
@@ -66,7 +66,7 @@ public sealed class ChatEventService
 
     public bool TryIngestBatch(ChatRoomDagState roomState, IEnumerable<ChatEvent> events, out string? error)
     {
-        return ChatDagEngine.TryIngestBatch(
+        return CausalDagEngine.TryIngestBatch(
             roomState,
             events,
             _accountService.VerifySignature,

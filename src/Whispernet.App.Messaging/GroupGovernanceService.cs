@@ -4,7 +4,7 @@ using System.Text;
 using System.Text.Json;
 using Whispernet.Core;
 
-namespace Whispernet.App;
+namespace Whispernet.App.Messaging;
 
 /// <summary>
 /// Données contenues dans un lien d'invitation <c>whispernet://invite/...</c>.

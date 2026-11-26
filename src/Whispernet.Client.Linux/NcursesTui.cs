@@ -1,6 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text;
-using Whispernet.App;
+using Whispernet.App.Messaging;
 using Whispernet.Core;
 using Whispernet.Transport.Iroh;
 
@@ -312,7 +312,11 @@ internal sealed class NcursesTui
             if (_governedGroups.TryGetValue(_activeGroupId, out GroupGovernanceState? activeGov))
             {
                 pendingCount = _govService.GetPendingJoinRequests(activeGov.GroupId).Count;
-                if (_activeSession is not null && activeGov.ActiveModerators.ContainsKey(_activeSession.Profile.AuthorId))
+                if (activeGov.CurrentManifest.IsTerminated)
+                {
+                    modBadge = " | [TERMINATED]";
+                }
+                else if (_activeSession is not null && activeGov.ActiveModerators.ContainsKey(_activeSession.Profile.AuthorId))
                 {
                     modBadge = pendingCount > 0 ? $" | [MOD Pending:{pendingCount}]" : " | [MOD]";
                 }
@@ -1120,13 +1124,19 @@ internal sealed class NcursesTui
         {
             if (_activeSession is null || !_governedGroups.TryGetValue(_activeGroupId, out GroupGovernanceState? govState))
             {
-                AddLog(LogTheme.Group, "No active governed group or locked session.");
+                ShowCommandError(LogTheme.Group, "No active governed group or unlocked account.", "/group create <title> [password]");
                 return;
             }
 
             await _govService.TerminateGroupAsync(_activeSession, govState).ConfigureAwait(false);
+            if (_directMesh is not null)
+            {
+                _directMesh.RegisterGroup(govState);
+                await _directMesh.BroadcastSyncPayloadAsync(govState.GroupId).ConfigureAwait(false);
+            }
             AddLog(LogTheme.Group, $"Group '{_activeGroupTitle}' permanently terminated.");
-            AddChatMessage(_activeGroupId, "GROUP", "", "Group permanently terminated by administrator.");
+            AddChatMessage(_activeGroupId, "GROUP", "", "Group permanently terminated by administrator (broadcasted to peers).");
+            lock (_stateLock) { _needsRedraw = true; }
         }
         else if (sub == "invite")
         {
@@ -1854,7 +1864,15 @@ internal sealed class NcursesTui
                             RecordPeerSeen(peerId);
                         }
                         AddLog(LogTheme.Group, $"Synced group '{syncedState.CurrentManifest.Title}' (#{ShortId(syncedState.GroupId.Value)}).");
-                        AddChatMessage(syncedState.GroupId.Value, "GROUP", "", $"Joined & synced '{syncedState.CurrentManifest.Title}'.");
+                        if (syncedState.CurrentManifest.IsTerminated)
+                        {
+                            AddChatMessage(syncedState.GroupId.Value, "GROUP", "",
+                                $"Group '{syncedState.CurrentManifest.Title}' was permanently terminated by administrator.");
+                        }
+                        else
+                        {
+                            AddChatMessage(syncedState.GroupId.Value, "GROUP", "", $"Joined & synced '{syncedState.CurrentManifest.Title}'.");
+                        }
                     }
                     else
                     {

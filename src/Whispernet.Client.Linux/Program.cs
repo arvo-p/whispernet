@@ -1,6 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
-using Whispernet.App;
+using Whispernet.App.Messaging;
 using Whispernet.Core;
 using Whispernet.Transport.Iroh;
 
@@ -47,7 +47,7 @@ internal static class Program
         GroupMeshService? directMesh = null;
         CancellationTokenSource? meshCts = null;
 
-        Console.WriteLine("Whispernet.App Interactive CLI");
+        Console.WriteLine("Whispernet.App.Messaging Interactive CLI");
         Console.WriteLine($"Data root: {effectiveRoot}");
         Console.WriteLine("Type 'help' for available commands, 'exit' to quit.");
 

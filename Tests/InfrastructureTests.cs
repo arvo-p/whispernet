@@ -1,6 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
-using Whispernet.App;
+using Whispernet.App.Messaging;
 using Whispernet.Core;
 using Whispernet.Transport.Iroh;
 
@@ -1004,7 +1004,7 @@ public static class InfrastructureTests
             // Alice goes offline while Bob creates 1,050 new events (3 batches: 500 + 500 + 50)
             for (int i = 0; i < 1050; i++)
             {
-                (IReadOnlyList<byte[]> parents, ulong nextClock) = ChatDagEngine.PrepareNextEventCausalContext(bobDag);
+                (IReadOnlyList<byte[]> parents, ulong nextClock) = CausalDagEngine.PrepareNextEventCausalContext(bobDag);
                 ChatEvent next = chatEventService.CreateSignedEvent(
                     bob, roomIdBytes, parents, nextClock, t0 + (ulong)(10 + i), $"Msg-{i}");
                 Assert(chatEventService.TryIngestEvent(bobDag, next, out string? err), $"Bob ingest {i}: {err}");

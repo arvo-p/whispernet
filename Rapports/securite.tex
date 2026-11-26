@@ -108,7 +108,7 @@ Chaque message est un nœud immuable du DAG causal du salon :
     \begin{itemize}
         \item \texttt{ChatEvent.ComputeEventId} et \texttt{ChatEvent.BuildSignableBytes}.
         \item \texttt{ChatEventService.CreateSignedEvent} : calcule \texttt{event\_id} et signe l'événement complet via \texttt{AccountSession}.
-        \item \texttt{ChatDagEngine.TryIngestEvent} : vérifie la limite de 15 parents, la cohérence de \texttt{logical\_clock}, l'intégrité de \texttt{event\_id} et la signature ECDSA avant d'insérer et de trier le message.
+        \item \texttt{CausalDagEngine.TryIngestEvent} : vérifie la limite de 15 parents, la cohérence de \texttt{logical\_clock}, l'intégrité de \texttt{event\_id} et la signature ECDSA avant d'insérer et de trier le message.
     \end{itemize}
 \end{itemize}
 

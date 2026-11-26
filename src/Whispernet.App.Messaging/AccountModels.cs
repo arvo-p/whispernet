@@ -1,7 +1,7 @@
 using System.Security.Cryptography;
 using Whispernet.Core;
 
-namespace Whispernet.App;
+namespace Whispernet.App.Messaging;
 
 /// <summary>
 /// Métadonnées publiques persistées d'un compte auteur Whispernet.

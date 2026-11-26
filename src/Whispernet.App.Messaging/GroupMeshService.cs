@@ -4,7 +4,7 @@ using System.Text.Json;
 using Whispernet.Core;
 using Whispernet.Transport.Iroh;
 
-namespace Whispernet.App;
+namespace Whispernet.App.Messaging;
 
 /// <summary>
 /// Message applicatif échangé dans une conversation ou un groupe.
@@ -409,6 +409,28 @@ public sealed class GroupMeshService
     }
 
     /// <summary>
+    /// Diffuse le manifeste et l'état courant du groupe (ex: mise à jour des règles ou fermeture définitive)
+    /// à tous les pairs actifs du groupe.
+    /// </summary>
+    public async Task BroadcastSyncPayloadAsync(
+        GroupId groupId,
+        CancellationToken ct = default)
+    {
+        if (!_conversations.TryGetValue(groupId.Value, out NodeState? nodeState))
+        {
+            return;
+        }
+
+        GroupRosterSyncPayload syncPayload = BuildSyncPayload(groupId);
+        var packet = new GroupWirePacket(GroupWirePacketKind.RosterSync, SyncPayload: syncPayload);
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(packet);
+
+        IEnumerable<Task> tasks = nodeState.HyParView.ActiveView.Select(peer =>
+            _transport.SendUniAsync(peer, payload, allowDhtLookup: true, ct: ct));
+        await Task.WhenAll(tasks).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Diffuse une décision de modération signée aux pairs actifs du groupe.
     /// </summary>
     public async Task BroadcastModerationActionAsync(
@@ -459,12 +481,12 @@ public sealed class GroupMeshService
         GroupId groupId,
         ChatRoomDagState localDag,
         IReadOnlyList<string> remoteHeadIds,
-        int batchSize = ChatDagEngine.DefaultSyncBatchSize,
+        int batchSize = CausalDagEngine.DefaultSyncBatchSize,
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(localDag);
-        IReadOnlyList<ChatEvent> slice = ChatDagEngine.ComputeMissingTopologicalSlice(localDag, remoteHeadIds);
-        IReadOnlyList<IReadOnlyList<ChatEvent>> batches = ChatDagEngine.ChunkTopologicalSlice(slice, batchSize);
+        IReadOnlyList<ChatEvent> slice = CausalDagEngine.ComputeMissingTopologicalSlice(localDag, remoteHeadIds);
+        IReadOnlyList<IReadOnlyList<ChatEvent>> batches = CausalDagEngine.ChunkTopologicalSlice(slice, batchSize);
 
         for (int i = 0; i < batches.Count; i++)
         {

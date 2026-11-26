@@ -2,7 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Whispernet.Core;
 
-namespace Whispernet.App;
+namespace Whispernet.App.Messaging;
 
 /// <summary>
 /// Primitives cryptographiques sécurisées pour l'identité d'auteur et le chiffrement symétrique.

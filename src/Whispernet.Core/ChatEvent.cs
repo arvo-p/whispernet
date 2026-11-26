@@ -14,49 +14,25 @@ public sealed record ChatEvent(
     ulong LogicalClock,
     ulong TimestampMs,
     byte[] Payload,
-    byte[] Signature)
+    byte[] Signature) : ICausalEvent
 {
-    public const int HashSizeBytes = 32;
-    public const int MaxParents = 15;
+    public const int HashSizeBytes = CausalDagEngine.HashSizeBytes;
+    public const int MaxParents = CausalDagEngine.MaxParents;
 
     public string EventIdHex => Convert.ToHexStringLower(EventId);
     public string RoomIdHex => Convert.ToHexStringLower(RoomId);
+    byte[] ICausalEvent.ScopeId => RoomId;
+
     public AuthorId GetAuthorId() => new(Convert.ToHexStringLower(SHA256.HashData(AuthorPublicKey)));
+
+    public byte[] BuildSignableBytes()
+        => BuildSignableBytes(EventId, RoomId, AuthorPublicKey, Parents, LogicalClock, TimestampMs, Payload);
 
     /// <summary>
     /// Calcule l'identifiant unique event_id (32 octets SHA-256) à partir de la liste ordonnée des parents et du payload.
     /// </summary>
     public static byte[] ComputeEventId(IReadOnlyList<byte[]> parents, ReadOnlySpan<byte> payload)
-    {
-        ArgumentNullException.ThrowIfNull(parents);
-        if (parents.Count > MaxParents)
-        {
-            throw new ArgumentException($"A ChatEvent cannot have more than {MaxParents} parents.", nameof(parents));
-        }
-
-        int totalLen = 4 + (parents.Count * HashSizeBytes) + 4 + payload.Length;
-        byte[] buffer = new byte[totalLen];
-        Span<byte> span = buffer;
-
-        BinaryPrimitives.WriteInt32LittleEndian(span[..4], parents.Count);
-        int offset = 4;
-        foreach (byte[] parent in parents)
-        {
-            if (parent is null || parent.Length != HashSizeBytes)
-            {
-                throw new ArgumentException("Each parent event_id must be exactly 32 bytes.", nameof(parents));
-            }
-
-            parent.CopyTo(span.Slice(offset, HashSizeBytes));
-            offset += HashSizeBytes;
-        }
-
-        BinaryPrimitives.WriteInt32LittleEndian(span.Slice(offset, 4), payload.Length);
-        offset += 4;
-        payload.CopyTo(span.Slice(offset));
-
-        return SHA256.HashData(span);
-    }
+        => CausalDagEngine.ComputeEventId(parents, payload, MaxParents);
 
     /// <summary>
     /// Construit le bloc binaire canonique signé par la clé privée ECDSA de l'auteur.
@@ -106,5 +82,18 @@ public sealed record ChatEvent(
         payload.CopyTo(span.Slice(offset, payload.Length));
 
         return buffer;
+    }
+}
+
+/// <summary>
+/// État en mémoire du DAG causal d'un salon de discussion.
+/// </summary>
+public sealed class ChatRoomDagState : CausalDagState<ChatEvent>
+{
+    public byte[] RoomId => ScopeId;
+    public string RoomIdHex => ScopeIdHex;
+
+    public ChatRoomDagState(byte[] roomId) : base(roomId)
+    {
     }
 }
