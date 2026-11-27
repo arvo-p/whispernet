@@ -86,6 +86,7 @@ internal sealed class NcursesTui
 
     private AccountSession? _activeSession;
     private SqlitePeerCacheRepository? _peerCache;
+    private SqliteChatHistoryRepository? _chatHistoryRepo;
     private IrohEndpointAdapter? _transport;
     private GroupMeshService? _directMesh;
     private CancellationTokenSource? _meshCts;
@@ -93,6 +94,8 @@ internal sealed class NcursesTui
     private string _activeGroupId = "general";
     private string _activeGroupTitle = "General Group";
     private string? _lastInviteLink;
+    private string? _boundSecretKeyB32;
+    private string _boundAlpn = "/whispernet/direct/1";
     private bool _showLogsPanel;
     private bool _showPendingPanel;
     private int _selectedPendingIndex;
@@ -114,9 +117,49 @@ internal sealed class NcursesTui
     }
 
     public GroupGovernanceService GovernanceService => _govService;
+    public string ActiveGroupId => _activeGroupId;
+    public string? LastInviteLink => _lastInviteLink;
+    public NodeId? SelfNodeId => _transport?.SelfId;
+
+    public async Task InitializePersistenceAsync()
+    {
+        await TryHydratePeersFromSqliteAsync().ConfigureAwait(false);
+        await TryHydrateChatHistoryFromSqliteAsync().ConfigureAwait(false);
+    }
+
+    public IReadOnlyList<string> GetRoomMessageContents(string groupId)
+    {
+        lock (_stateLock)
+        {
+            return _messages
+                .Where(m => m.GroupId.Equals(groupId, StringComparison.Ordinal) &&
+                            !m.AuthorName.Equals("GROUP", StringComparison.Ordinal) &&
+                            !m.AuthorName.Equals("MOD", StringComparison.Ordinal) &&
+                            !m.AuthorName.Equals("INVITE", StringComparison.Ordinal) &&
+                            !m.AuthorName.Equals("CLIPBOARD", StringComparison.Ordinal) &&
+                            !m.AuthorName.Equals("AUTH", StringComparison.Ordinal) &&
+                            !m.AuthorName.Equals("MESH", StringComparison.Ordinal) &&
+                            !m.AuthorName.Equals("SYSTEM", StringComparison.Ordinal) &&
+                            !m.AuthorName.Equals("USAGE", StringComparison.Ordinal))
+                .Select(static m => $"{m.AuthorName}: {m.Content}")
+                .ToList();
+        }
+    }
+
+    public IReadOnlyList<string> GetRecentLogLines(int count = 50)
+    {
+        lock (_stateLock)
+        {
+            return _logs
+                .TakeLast(count)
+                .Select(static l => $"[{l.Theme}] {l.Message}")
+                .ToList();
+        }
+    }
 
     public void RegisterGovernedGroup(GroupGovernanceState govState)
     {
+        List<NodeId>? fallbackPeers = null;
         lock (_stateLock)
         {
             string key = govState.GroupId.Value;
@@ -124,10 +167,59 @@ internal sealed class NcursesTui
             _groupTitles[key] = govState.CurrentManifest.Title;
             _activeGroupId = key;
             _activeGroupTitle = govState.CurrentManifest.Title;
+            if (_roomDags.TryGetValue(key, out ChatRoomDagState? existingDag))
+            {
+                RebuildRoomMessagesLocked(key, _activeGroupTitle, existingDag);
+            }
+            if (govState.KnownAuthorNodes.Count <= 1)
+            {
+                fallbackPeers = _peers.Keys.ToList();
+            }
             _needsRedraw = true;
         }
 
-        _directMesh?.RegisterGroup(govState);
+        if (_directMesh is not null && _transport is not null)
+        {
+            _directMesh.RegisterGroup(govState, fallbackPeers);
+            TriggerBackgroundGroupSync(govState);
+        }
+    }
+
+    private void TriggerBackgroundGroupSync(GroupGovernanceState govState)
+    {
+        GroupMeshService? mesh = _directMesh;
+        IrohEndpointAdapter? transport = _transport;
+        if (mesh is null || transport is null || govState.CurrentManifest.IsTerminated)
+        {
+            return;
+        }
+
+        IReadOnlyList<NodeId> targets = govState.GetRoomMemberEndpoints(transport.SelfId);
+        if (targets.Count == 0)
+        {
+            return;
+        }
+
+        ChatRoomDagState localDag;
+        lock (_stateLock)
+        {
+            localDag = GetOrCreateRoomDagLocked(govState.GroupId.Value, Convert.FromHexString(govState.GroupId.Value));
+        }
+
+        foreach (NodeId target in targets)
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await mesh.SendDagSyncRequestAsync(target, govState.GroupId, localDag).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Pair hors-ligne ou pas encore joignable
+                }
+            });
+        }
     }
 
     public bool IngestDagEvent(string groupId, string groupTitle, ChatEvent evt, string authorName)
@@ -151,32 +243,48 @@ internal sealed class NcursesTui
             }
 
             // Reconstruire les messages du groupe dans l'ordre exact de SortedHistory (parents -> logical_clock -> timestamp_ms)
-            _messages.RemoveAll(m => m.GroupId.Equals(groupId, StringComparison.Ordinal));
-            foreach (ChatEvent ordered in dag.SortedHistory)
-            {
-                AuthorId aId = ordered.GetAuthorId();
-                string aName = _knownAuthorNames.TryGetValue(aId, out string? n) ? n : "Peer";
-                string parentsShort = ordered.Parents.Count == 0
-                    ? "root"
-                    : string.Join(',', ordered.Parents.Select(p => Convert.ToHexStringLower(p)[..6]));
-                string text = Encoding.UTF8.GetString(ordered.Payload);
-                DateTimeOffset sentUtc = DateTimeOffset.FromUnixTimeMilliseconds((long)ordered.TimestampMs);
-
-                _messages.Add(new UiChatMessage(
-                    sentUtc,
-                    groupId,
-                    groupTitle,
-                    aName,
-                    $"@{aId.Value[..6]} [L={ordered.LogicalClock} id={ordered.EventIdHex[..6]} p={parentsShort}]",
-                    text));
-            }
-
+            RebuildRoomMessagesLocked(groupId, groupTitle, dag);
             _needsRedraw = true;
         }
 
         AddLog(LogTheme.Chat,
             $"DAG Ingested event={evt.EventIdHex[..8]} clock={evt.LogicalClock} parents={evt.Parents.Count} by {authorName}");
         return true;
+    }
+
+    private void RebuildRoomMessagesLocked(string groupId, string groupTitle, ChatRoomDagState dag)
+    {
+        _messages.RemoveAll(m => m.GroupId.Equals(groupId, StringComparison.Ordinal));
+        foreach (ChatEvent ordered in dag.SortedHistory)
+        {
+            AuthorId aId = ordered.GetAuthorId();
+            string aName = _knownAuthorNames.TryGetValue(aId, out string? n) && !string.IsNullOrWhiteSpace(n)
+                ? n
+                : aId.Value[..8];
+            string parentsShort = ordered.Parents.Count == 0
+                ? "root"
+                : string.Join(',', ordered.Parents.Select(p => Convert.ToHexStringLower(p)[..6]));
+            string text = Encoding.UTF8.GetString(ordered.Payload);
+            DateTimeOffset sentUtc = DateTimeOffset.FromUnixTimeMilliseconds((long)ordered.TimestampMs);
+
+            _messages.Add(new UiChatMessage(
+                sentUtc,
+                groupId,
+                groupTitle,
+                aName,
+                $"@{aId.Value[..6]} [L={ordered.LogicalClock} id={ordered.EventIdHex[..6]} p={parentsShort}]",
+                text));
+        }
+    }
+
+    private ChatRoomDagState GetOrCreateRoomDagLocked(string groupIdHex, byte[] roomIdBytes)
+    {
+        if (!_roomDags.TryGetValue(groupIdHex, out ChatRoomDagState? dag))
+        {
+            dag = new ChatRoomDagState(roomIdBytes);
+            _roomDags[groupIdHex] = dag;
+        }
+        return dag;
     }
 
     public void AddLog(LogTheme theme, string message)
@@ -231,6 +339,7 @@ internal sealed class NcursesTui
     public async Task RunAsync()
     {
         await TryHydratePeersFromSqliteAsync().ConfigureAwait(false);
+        await TryHydrateChatHistoryFromSqliteAsync().ConfigureAwait(false);
 
         // Activer le buffer d'écran alternatif ncurses/xterm et masquer le curseur matériel
         Console.OutputEncoding = Encoding.UTF8;
@@ -727,39 +836,115 @@ internal sealed class NcursesTui
         }
     }
 
-    private async Task SendChatMessageInActiveGroupAsync(string content)
+    private Task SendChatMessageInActiveGroupAsync(string content)
     {
+        string targetGroupId = _activeGroupId;
+        string targetGroupTitle = _activeGroupTitle;
         string authorName = _activeSession?.Profile.Username ?? "Anonymous";
+        AuthorId? senderAuthorId = _activeSession?.Profile.AuthorId;
         string authorBadge = _activeSession is null
             ? string.Empty
             : $"@{_activeSession.Profile.AuthorId.Value[..8]}";
 
-        AddChatMessage(_activeGroupId, authorName, authorBadge, content, DateTimeOffset.UtcNow);
-        AddLog(LogTheme.Chat, $"Local message in '{_activeGroupTitle}' (#{_activeGroupId}) by {authorName}: {content}");
-
-        if (_directMesh is not null)
+        var activeGroup = new GroupId(targetGroupId);
+        if (_activeSession is not null && activeGroup.IsValid)
         {
-            try
+            ChatEvent evt;
+            lock (_stateLock)
             {
-                IReadOnlyDictionary<NodeId, bool> results = await _directMesh
-                    .SendMessageAsync(_activeGroupId, authorName, content, senderAuthorId: _activeSession?.Profile.AuthorId)
-                    .ConfigureAwait(false);
-
-                foreach (KeyValuePair<NodeId, bool> kv in results)
+                if (_governedGroups.TryGetValue(targetGroupId, out GroupGovernanceState? govState) &&
+                    !GroupGovernanceEngine.CanAuthorPost(govState, _activeSession.Profile.AuthorId))
                 {
-                    if (kv.Value)
-                    {
-                        RecordPeerSeen(kv.Key);
-                    }
-                    AddLog(LogTheme.Mesh, $"Sent chat packet to {kv.Key} -> {(kv.Value ? "OK" : "FAILED")}");
+                    AddLog(LogTheme.Chat, $"Blocked local post in '{targetGroupTitle}': author is not allowed to post.");
+                    AddChatMessage(targetGroupId, "GROUP", "", "You are not allowed to post in this group (not admitted, silenced, or group terminated).");
+                    return Task.CompletedTask;
                 }
+
+                ChatRoomDagState dag = GetOrCreateRoomDagLocked(targetGroupId, Convert.FromHexString(targetGroupId));
+                (IReadOnlyList<byte[]> parents, ulong nextClock) = CausalDagEngine.PrepareNextEventCausalContext(dag);
+                evt = _chatEventService.CreateSignedEvent(
+                    _activeSession,
+                    dag.RoomId,
+                    parents,
+                    nextClock,
+                    (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    content);
             }
-            catch (Exception ex)
+
+            if (!IngestDagEvent(targetGroupId, targetGroupTitle, evt, authorName))
             {
-                AddLog(LogTheme.Mesh, $"Send skipped/failed: {ex.Message}");
-                AddChatMessage(_activeGroupId, "MESH", "", $"Send failed: {ex.Message}");
+                return Task.CompletedTask;
             }
+
+            if (_chatHistoryRepo is not null)
+            {
+                _ = _chatHistoryRepo.UpsertEventAsync(evt, authorName);
+            }
+
+            AddLog(LogTheme.Chat, $"Signed ChatEvent L={evt.LogicalClock} in '{targetGroupTitle}' (#{ShortId(targetGroupId)}): {content}");
+
+            GroupMeshService? mesh = _directMesh;
+            if (mesh is not null)
+            {
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        IReadOnlyDictionary<NodeId, bool> results = await mesh
+                            .BroadcastChatEventAsync(activeGroup, evt)
+                            .ConfigureAwait(false);
+
+                        foreach (KeyValuePair<NodeId, bool> kv in results)
+                        {
+                            if (kv.Value)
+                            {
+                                RecordPeerSeen(kv.Key);
+                            }
+                            AddLog(LogTheme.Mesh, $"Sent ChatEvent to {kv.Key} -> {(kv.Value ? "OK" : "FAILED")}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        AddLog(LogTheme.Mesh, $"Send skipped/failed: {ex.Message}");
+                        AddChatMessage(targetGroupId, "MESH", "", $"Send failed: {ex.Message}");
+                    }
+                });
+            }
+            return Task.CompletedTask;
         }
+
+        AddChatMessage(targetGroupId, authorName, authorBadge, content, DateTimeOffset.UtcNow);
+        AddLog(LogTheme.Chat, $"Local message in '{targetGroupTitle}' (#{targetGroupId}) by {authorName}: {content}");
+
+        GroupMeshService? fallbackMesh = _directMesh;
+        if (fallbackMesh is not null)
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    IReadOnlyDictionary<NodeId, bool> results = await fallbackMesh
+                        .SendMessageAsync(targetGroupId, authorName, content, senderAuthorId: senderAuthorId)
+                        .ConfigureAwait(false);
+
+                    foreach (KeyValuePair<NodeId, bool> kv in results)
+                    {
+                        if (kv.Value)
+                        {
+                            RecordPeerSeen(kv.Key);
+                        }
+                        AddLog(LogTheme.Mesh, $"Sent chat packet to {kv.Key} -> {(kv.Value ? "OK" : "FAILED")}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    AddLog(LogTheme.Mesh, $"Send skipped/failed: {ex.Message}");
+                    AddChatMessage(targetGroupId, "MESH", "", $"Send failed: {ex.Message}");
+                }
+            });
+        }
+
+        return Task.CompletedTask;
     }
 
     private async Task ExecuteCommandAsync(string rawCommand)
@@ -1300,7 +1485,7 @@ internal sealed class NcursesTui
         if (tokens.Count < 2)
         {
             ShowCommandError(LogTheme.Group, "Missing /mod subcommand.",
-                "/mod <pending | accept <user|id> | ignore <user|id> | silence <id> [reason] | ban <id> [reason] | admit <id>>");
+                "/mod <pending | log | compact [window] | accept <user|id> | ignore <user|id> | silence <id> [reason] | ban <id> [reason] | admit <id>>");
             return;
         }
 
@@ -1320,6 +1505,59 @@ internal sealed class NcursesTui
         if (!_governedGroups.TryGetValue(_activeGroupId, out GroupGovernanceState? govState))
         {
             AddChatMessage(_activeGroupId, "MOD", "", "Active group is not a governed group. Create one with /group create <title>.");
+            return;
+        }
+
+        if (sub == "log" || sub == "govlog")
+        {
+            List<ModerationAction> entries = govState.GovernanceLog.Values
+                .OrderBy(static a => a.LamportClock)
+                .ThenBy(static a => a.IssuedAtUtc)
+                .ThenBy(static a => a.ComputeActionId(), StringComparer.Ordinal)
+                .ToList();
+
+            AddChatMessage(
+                _activeGroupId,
+                "MOD",
+                "",
+                $"GovernanceLog '{govState.CurrentManifest.Title}' (#{ShortId(govState.GroupId.Value)}): {entries.Count} entr(y/ies), MaxLamport={govState.MaxLamportClock}, Checkpoint={govState.CurrentManifest.CheckpointLamportClock}");
+
+            foreach (ModerationAction act in entries)
+            {
+                string actionId = ShortId(act.ComputeActionId());
+                string target = ShortId(act.TargetAuthorId.Value);
+                string issuer = ShortId(act.SignerAuthorId.Value);
+                int parentCount = act.Parents?.Count ?? 0;
+                AddChatMessage(
+                    _activeGroupId,
+                    "GOVLOG",
+                    "",
+                    $"[L={act.LamportClock}] {act.Kind} target={target} status={act.NewStatus} signer={issuer} id={actionId} parents={parentCount} reason=\"{act.Reason}\"");
+            }
+            lock (_stateLock) { _needsRedraw = true; }
+            return;
+        }
+
+        if (sub == "compact")
+        {
+            ulong window = 50;
+            if (tokens.Count >= 3 && !ulong.TryParse(tokens[2], out window))
+            {
+                ShowCommandError(LogTheme.Group, $"Invalid recentWindow '{tokens[2]}'.", "/mod compact [recentWindow]");
+                return;
+            }
+
+            int removed = GroupGovernanceEngine.CompactGovernanceLog(govState, window);
+            if (removed > 0 && _activeSession is not null)
+            {
+                await _govService.SaveGroupToVaultAsync(_activeSession, govState).ConfigureAwait(false);
+            }
+            AddChatMessage(
+                _activeGroupId,
+                "MOD",
+                "",
+                $"CompactGovernanceLog(window={window}): removed {removed} obsolete entr(y/ies), {govState.GovernanceLog.Count} remaining.");
+            lock (_stateLock) { _needsRedraw = true; }
             return;
         }
 
@@ -1355,13 +1593,12 @@ internal sealed class NcursesTui
             }
 
             _govService.AcceptPendingMember(_activeSession, govState, targetReq.RequesterAuthorId);
+            await _govService.SaveGroupToVaultAsync(_activeSession, govState).ConfigureAwait(false);
             RecordPeerSeen(targetReq.RequesterNodeId);
             if (_directMesh is not null)
             {
                 _directMesh.RegisterGroup(govState);
-                await _directMesh.SendSyncPayloadAsync(
-                    targetReq.RequesterNodeId,
-                    _directMesh.BuildSyncPayload(govState.GroupId)).ConfigureAwait(false);
+                await _directMesh.BroadcastSyncPayloadAsync(govState.GroupId).ConfigureAwait(false);
             }
             AddLog(LogTheme.Group, $"Accepted '{targetReq.RequesterUsername}' ({targetReq.RequesterAuthorId.Value[..8]}..) as Admitted.");
             AddChatMessage(_activeGroupId, "MOD", "", $"Admitted {targetReq.RequesterUsername} into the group.");
@@ -1385,6 +1622,12 @@ internal sealed class NcursesTui
             string reason = tokens.Count >= 4 ? string.Join(' ', tokens.Skip(3)) : $"Updated to {newStatus}";
             _govService.SetMemberStatus(
                 _activeSession, govState, targetId.Value, lastAction.TargetPublicKeySpkiBase64, newStatus, reason, lastAction.TargetLastKnownNodeId);
+            await _govService.SaveGroupToVaultAsync(_activeSession, govState).ConfigureAwait(false);
+            if (_directMesh is not null)
+            {
+                _directMesh.RegisterGroup(govState);
+                _ = _directMesh.BroadcastSyncPayloadAsync(govState.GroupId);
+            }
             AddLog(LogTheme.Group, $"Set {targetId.Value.Value[..8]}.. status -> {newStatus}.");
             AddChatMessage(_activeGroupId, "MOD", "", $"Updated {targetId.Value.Value[..8]}.. -> {newStatus}.");
             lock (_stateLock) { _needsRedraw = true; }
@@ -1423,13 +1666,12 @@ internal sealed class NcursesTui
             }
 
             _govService.AcceptPendingMember(_activeSession, govState, req.RequesterAuthorId);
+            await _govService.SaveGroupToVaultAsync(_activeSession, govState).ConfigureAwait(false);
             RecordPeerSeen(req.RequesterNodeId);
             if (_directMesh is not null)
             {
                 _directMesh.RegisterGroup(govState);
-                await _directMesh.SendSyncPayloadAsync(
-                    req.RequesterNodeId,
-                    _directMesh.BuildSyncPayload(govState.GroupId)).ConfigureAwait(false);
+                await _directMesh.BroadcastSyncPayloadAsync(govState.GroupId).ConfigureAwait(false);
             }
             AddLog(LogTheme.Group, $"Accepted '{req.RequesterUsername}' ({req.RequesterAuthorId.Value[..8]}..) via quick key.");
         }
@@ -1673,6 +1915,18 @@ internal sealed class NcursesTui
                 AddLog(LogTheme.Auth, unlockedMsg);
                 AddChatMessage(_activeGroupId, "AUTH", "", unlockedMsg);
 
+                if (_transport is not null)
+                {
+                    string accountKeyPath = Path.Combine(session.AccountDirectory, "iroh_node.key");
+                    string expectedKeyB32 = IrohEndpointAdapter.GenerateOrLoadSecretKeyBase32(accountKeyPath);
+                    if (!string.Equals(_boundSecretKeyB32, expectedKeyB32, StringComparison.Ordinal))
+                    {
+                        string prevAlpn = _boundAlpn;
+                        StopMeshInternal();
+                        await HandleMeshCommandAsync(new List<string> { "mesh", "start", prevAlpn }).ConfigureAwait(false);
+                    }
+                }
+
                 IReadOnlyList<GroupGovernanceState> savedGroups = await _govService.LoadAllGroupsFromVaultAsync(session).ConfigureAwait(false);
                 foreach (GroupGovernanceState g in savedGroups)
                 {
@@ -1813,8 +2067,37 @@ internal sealed class NcursesTui
                 }
 
                 await EnsurePeerCacheAsync().ConfigureAwait(false);
-                string alpn = tokens.Count >= 3 ? tokens[2] : "/whispernet/direct/1";
-                _transport = IrohEndpointAdapter.CreateAndBind(alpn: alpn, enableRelay: true, onlineTimeoutMs: 3000);
+                string? arg = tokens.Count >= 3 ? tokens[2] : null;
+                string alpn = arg is not null && arg.StartsWith('/') ? arg : "/whispernet/direct/1";
+                string? secretKeyB32;
+                if (string.Equals(arg, "--new", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(arg, "new", StringComparison.OrdinalIgnoreCase))
+                {
+                    secretKeyB32 = null; // Endpoint éphémère aléatoire
+                }
+                else if (arg is not null && !arg.StartsWith('/'))
+                {
+                    string namedKeyPath = Path.Combine(_effectiveRoot, $"iroh_node_{arg}.key");
+                    secretKeyB32 = IrohEndpointAdapter.GenerateOrLoadSecretKeyBase32(namedKeyPath);
+                }
+                else if (_activeSession is not null)
+                {
+                    string accountKeyPath = Path.Combine(_activeSession.AccountDirectory, "iroh_node.key");
+                    secretKeyB32 = IrohEndpointAdapter.GenerateOrLoadSecretKeyBase32(accountKeyPath);
+                }
+                else
+                {
+                    string irohKeyPath = Path.Combine(_effectiveRoot, "iroh_node.key");
+                    secretKeyB32 = IrohEndpointAdapter.GenerateOrLoadSecretKeyBase32(irohKeyPath);
+                }
+
+                _boundSecretKeyB32 = secretKeyB32;
+                _boundAlpn = alpn;
+                _transport = IrohEndpointAdapter.CreateAndBind(
+                    alpn: alpn,
+                    secretKeyBase32: secretKeyB32,
+                    enableRelay: true,
+                    onlineTimeoutMs: 3000);
                 _directMesh = new GroupMeshService(_transport, _peerCache);
                 _directMesh.MessageReceived += msg =>
                 {
@@ -1833,7 +2116,11 @@ internal sealed class NcursesTui
                             if (autoAdmitted is not null || govState.GetMemberStatus(req.RequesterAuthorId) is MemberStatus.Admitted or MemberStatus.Silenced)
                             {
                                 _directMesh.RegisterGroup(govState);
-                                _ = _directMesh.SendSyncPayloadAsync(req.RequesterNodeId, _directMesh.BuildSyncPayload(govState.GroupId));
+                                if (_activeSession is not null)
+                                {
+                                    _ = _govService.SaveGroupToVaultAsync(_activeSession, govState);
+                                }
+                                _ = _directMesh.BroadcastSyncPayloadAsync(govState.GroupId);
                                 AddLog(LogTheme.Group, $"Auto-admitted & synced '{req.RequesterUsername}' ({req.RequesterAuthorId.Value[..8]}..).");
                             }
                             else
@@ -1855,9 +2142,19 @@ internal sealed class NcursesTui
                         syncedState is not null)
                     {
                         RegisterGovernedGroup(syncedState);
+                        if (_activeSession is not null)
+                        {
+                            _ = _govService.SaveGroupToVaultAsync(_activeSession, syncedState);
+                        }
                         if (sync.SenderNodeId is NodeId senderNode)
                         {
                             RecordPeerSeen(senderNode);
+                            ChatRoomDagState localDag;
+                            lock (_stateLock)
+                            {
+                                localDag = GetOrCreateRoomDagLocked(syncedState.GroupId.Value, Convert.FromHexString(syncedState.GroupId.Value));
+                            }
+                            _ = _directMesh.SendDagSyncRequestAsync(senderNode, syncedState.GroupId, localDag);
                         }
                         foreach (NodeId peerId in syncedState.GetRoomMemberEndpoints(_transport.SelfId))
                         {
@@ -1885,16 +2182,78 @@ internal sealed class NcursesTui
                         GroupGovernanceEngine.TryApplyModerationAction(govState, action, _accountService.VerifySignature, out _, out _))
                     {
                         _directMesh.RegisterGroup(govState);
+                        if (_activeSession is not null)
+                        {
+                            _ = _govService.SaveGroupToVaultAsync(_activeSession, govState);
+                        }
                         AddLog(LogTheme.Group, $"Applied moderation update: {action.TargetAuthorId.Value[..8]}.. -> {action.NewStatus}");
                     }
                 };
-                foreach (GroupGovernanceState existingGov in _governedGroups.Values)
+                _directMesh.DagSyncRequestReceived += req =>
                 {
-                    _directMesh.RegisterGroup(existingGov);
+                    RecordPeerSeen(req.RequesterNodeId);
+                    ChatRoomDagState localDag;
+                    lock (_stateLock)
+                    {
+                        localDag = GetOrCreateRoomDagLocked(req.GroupId.Value, Convert.FromHexString(req.GroupId.Value));
+                    }
+                    _ = _directMesh.StreamTopologicalSliceAsync(req.RequesterNodeId, req.GroupId, localDag, req.KnownHeadIds);
+                };
+                _directMesh.DagSyncBatchReceived += batch =>
+                {
+                    if (batch.SenderNodeId is NodeId senderNode)
+                    {
+                        RecordPeerSeen(senderNode);
+                    }
+                    if (batch.Events.Count == 0)
+                    {
+                        return;
+                    }
+
+                    string gid = batch.GroupId.Value;
+                    bool ok;
+                    string? err;
+                    lock (_stateLock)
+                    {
+                        ChatRoomDagState dag = GetOrCreateRoomDagLocked(gid, Convert.FromHexString(gid));
+                        ok = _chatEventService.TryIngestBatch(dag, batch.Events, out err);
+                        if (ok)
+                        {
+                            string title = _groupTitles.TryGetValue(gid, out string? t) ? t : gid;
+                            RebuildRoomMessagesLocked(gid, title, dag);
+                            _needsRedraw = true;
+                        }
+                    }
+
+                    if (ok)
+                    {
+                        if (_chatHistoryRepo is not null)
+                        {
+                            _ = _chatHistoryRepo.UpsertBatchAsync(batch.Events);
+                        }
+                        AddLog(LogTheme.Chat, $"Synced {batch.Events.Count} ChatEvent(s) for #{ShortId(gid)} (batch {batch.BatchIndex + 1}/{batch.TotalBatches}).");
+                    }
+                    else
+                    {
+                        AddLog(LogTheme.Chat, $"Rejected DagSyncBatch for #{ShortId(gid)}: {err}");
+                    }
+                };
+                List<NodeId> knownPeersSnapshot;
+                lock (_stateLock)
+                {
+                    knownPeersSnapshot = _peers.Keys.ToList();
                 }
 
                 _meshCts = new CancellationTokenSource();
                 _transport.StartAcceptLoop(_directMesh.HandleIncomingPayload, _meshCts.Token);
+
+                foreach (GroupGovernanceState existingGov in _governedGroups.Values)
+                {
+                    IEnumerable<NodeId>? fallback = existingGov.KnownAuthorNodes.Count <= 1 ? knownPeersSnapshot : null;
+                    _directMesh.RegisterGroup(existingGov, fallback);
+                    TriggerBackgroundGroupSync(existingGov);
+                }
+
                 AddLog(LogTheme.Mesh, $"Iroh endpoint bound: SelfId={_transport.SelfId}");
                 AddChatMessage(_activeGroupId, "MESH", "", $"Started Iroh node. SelfId={_transport.SelfId}");
                 break;
@@ -1969,6 +2328,67 @@ internal sealed class NcursesTui
         catch (Exception ex)
         {
             AddLog(LogTheme.Cache, $"PeerCache load skipped: {ex.Message}");
+        }
+    }
+
+    private async Task EnsureChatHistoryRepoAsync()
+    {
+        if (_chatHistoryRepo is not null)
+        {
+            return;
+        }
+
+        Directory.CreateDirectory(_effectiveRoot);
+        string dbPath = WhispernetPaths.GetChatHistoryDbPath(_effectiveRoot);
+        _chatHistoryRepo = new SqliteChatHistoryRepository(dbPath);
+        await _chatHistoryRepo.InitializeAsync().ConfigureAwait(false);
+        AddLog(LogTheme.Cache, $"Initialized SQLite ChatHistory at '{dbPath}'.");
+    }
+
+    private async Task TryHydrateChatHistoryFromSqliteAsync()
+    {
+        try
+        {
+            await EnsureChatHistoryRepoAsync().ConfigureAwait(false);
+            if (_chatHistoryRepo is null)
+            {
+                return;
+            }
+
+            IReadOnlyList<(ChatEvent Event, string AuthorName)> saved = await _chatHistoryRepo.LoadAllEventsAsync().ConfigureAwait(false);
+            if (saved.Count == 0)
+            {
+                return;
+            }
+
+            lock (_stateLock)
+            {
+                foreach (var group in saved.GroupBy(static x => x.Event.RoomIdHex, StringComparer.Ordinal))
+                {
+                    foreach ((ChatEvent evt, string authorName) in group)
+                    {
+                        if (!string.IsNullOrWhiteSpace(authorName))
+                        {
+                            _knownAuthorNames[evt.GetAuthorId()] = authorName;
+                        }
+                    }
+
+                    ChatEvent first = group.First().Event;
+                    ChatRoomDagState dag = GetOrCreateRoomDagLocked(group.Key, first.RoomId);
+                    if (_chatEventService.TryIngestBatch(dag, group.Select(static x => x.Event), out _))
+                    {
+                        string title = _groupTitles.TryGetValue(group.Key, out string? t) ? t : group.Key;
+                        RebuildRoomMessagesLocked(group.Key, title, dag);
+                    }
+                }
+                _needsRedraw = true;
+            }
+
+            AddLog(LogTheme.Cache, $"Loaded {saved.Count} ChatEvent(s) from SQLite history.");
+        }
+        catch (Exception ex)
+        {
+            AddLog(LogTheme.Cache, $"ChatHistory load skipped: {ex.Message}");
         }
     }
 

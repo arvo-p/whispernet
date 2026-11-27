@@ -64,4 +64,13 @@ public static class WhispernetPaths
         string root = string.IsNullOrWhiteSpace(rootDirectory) ? GetDataDirectory() : Path.GetFullPath(rootDirectory);
         return Path.Combine(root, "peer_cache.db");
     }
+
+    /// <summary>
+    /// Retourne le chemin par défaut de la base SQLite de l'historique de chat (DAG causal).
+    /// </summary>
+    public static string GetChatHistoryDbPath(string? rootDirectory = null)
+    {
+        string root = string.IsNullOrWhiteSpace(rootDirectory) ? GetDataDirectory() : Path.GetFullPath(rootDirectory);
+        return Path.Combine(root, "chat_history.db");
+    }
 }

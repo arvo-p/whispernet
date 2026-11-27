@@ -31,6 +31,43 @@ public sealed class IrohEndpointAdapter : IDisposable
     }
 
     /// <summary>
+    /// Charge la clé secrète Iroh Base32 depuis <paramref name="filePath"/> si elle existe,
+    /// ou en génère une nouvelle et la persiste sur disque afin de conserver un <see cref="NodeId"/> stable entre les sessions.
+    /// </summary>
+    public static unsafe string GenerateOrLoadSecretKeyBase32(string filePath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
+        if (File.Exists(filePath))
+        {
+            string existing = File.ReadAllText(filePath).Trim();
+            if (!string.IsNullOrWhiteSpace(existing))
+            {
+                return existing;
+            }
+        }
+
+        SecretKey* sk = iroh.secret_key_generate();
+        try
+        {
+            byte* strPtr = iroh.secret_key_as_base32(sk);
+            string keyB32 = Marshal.PtrToStringUTF8((IntPtr)strPtr) ?? string.Empty;
+            iroh.rust_free_string(strPtr);
+
+            string? dir = Path.GetDirectoryName(filePath);
+            if (!string.IsNullOrEmpty(dir))
+            {
+                Directory.CreateDirectory(dir);
+            }
+            File.WriteAllText(filePath, keyB32);
+            return keyB32;
+        }
+        finally
+        {
+            iroh.secret_key_free(sk);
+        }
+    }
+
+    /// <summary>
     /// Crée et lie un endpoint Iroh avec le mode de découverte choisi (par défaut <see cref="DiscoveryConfig.DISCOVERY_CONFIG_ALL"/> :
     /// Mainline DHT + Pkarr/DNS + mDNS ; passer <c>(DiscoveryConfig)4</c> pour Mainline DHT seule)
     /// et une clé secrète optionnelle (ex: persistée sur Raspberry Pi).
@@ -135,14 +172,40 @@ public sealed class IrohEndpointAdapter : IDisposable
     /// Envoie un payload binaire sur un stream QUIC unidirectionnel vers <paramref name="target"/>
     /// (en résolvant automatiquement via Mainline DHT si aucune connexion n'est ouverte).
     /// </summary>
-    public async Task SendUniAsync( NodeId target, byte[] payload, string? cachedTicket = null,
-			bool allowDhtLookup = true, CancellationToken ct = default){
-        bool connected = await ConnectSmartAsync(target, cachedTicket, allowDhtLookup, ct).ConfigureAwait(false);
-        if (!connected || !_connections.TryGetValue(target, out var entry)){
-            throw new InvalidOperationException($"Impossible de joindre le pair {target} (ticket et résolution Mainline DHT échoués).");
-        }
+    public async Task SendUniAsync(NodeId target, byte[] payload, string? cachedTicket = null,
+            bool allowDhtLookup = true, CancellationToken ct = default)
+    {
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            string? effectiveTicket = attempt == 0 ? cachedTicket : null;
+            bool connected = await ConnectSmartAsync(target, effectiveTicket, allowDhtLookup, ct).ConfigureAwait(false);
+            if (connected && _connections.TryGetValue(target, out var entry))
+            {
+                try
+                {
+                    await Task.Run(() => SendUniSync(target, entry, payload), ct).ConfigureAwait(false);
+                    return;
+                }
+                catch
+                {
+                    _connections.TryRemove(target, out _);
+                    if (attempt == 1)
+                    {
+                        throw;
+                    }
+                }
+            }
+            else
+            {
+                _connections.TryRemove(target, out _);
+                if (attempt == 1)
+                {
+                    throw new InvalidOperationException($"Impossible de joindre le pair {target} (ticket et résolution Mainline DHT échoués).");
+                }
+            }
 
-        await Task.Run(() => SendUniSync(target, entry, payload), ct).ConfigureAwait(false);
+            await Task.Delay(500, ct).ConfigureAwait(false);
+        }
     }
 
     private unsafe void SendUniSync(NodeId target, (IntPtr ConnPtr, object SendLock) entry, byte[] payload){

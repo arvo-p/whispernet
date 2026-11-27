@@ -32,6 +32,11 @@ internal static class Program
             return await RunModQueueDemoAsync(effectiveRoot, accountService).ConfigureAwait(false);
         }
 
+        if (args.Contains("--test-reopen", StringComparer.OrdinalIgnoreCase))
+        {
+            return await RunReopenAutomationTestAsync(args).ConfigureAwait(false);
+        }
+
         bool forceCli = args.Contains("--cli", StringComparer.OrdinalIgnoreCase);
         bool forceTui = args.Contains("--tui", StringComparer.OrdinalIgnoreCase);
         if (forceTui || (!forceCli && !Console.IsInputRedirected))
@@ -780,6 +785,295 @@ internal static class Program
         Console.WriteLine("\n=== MODERATOR PENDING APPROVALS QUEUE (After Accept Bob + Ignore Charlie) ===");
         Console.WriteLine(tui.RenderFrame(112, 20));
         return 0;
+    }
+
+    private static async Task<int> RunReopenAutomationTestAsync(string[] args)
+    {
+        int phaseIdx = Array.FindIndex(args, static a => a.Equals("--phase", StringComparison.OrdinalIgnoreCase));
+        if (phaseIdx >= 0 && phaseIdx + 2 < args.Length)
+        {
+            string phase = args[phaseIdx + 1];
+            string sharedRoot = args[phaseIdx + 2];
+            if (phase == "1")
+            {
+                return await RunReopenPhase1Async(sharedRoot).ConfigureAwait(false);
+            }
+            if (phase == "2")
+            {
+                return await RunReopenPhase2Async(sharedRoot).ConfigureAwait(false);
+            }
+        }
+
+        string testRoot = Path.Combine(Path.GetTempPath(), $"whispernet_reopen_test_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(testRoot);
+        Console.WriteLine($"[REOPEN-TEST] Root directory: {testRoot}");
+
+        try
+        {
+            string dllPath = typeof(Program).Assembly.Location;
+
+            Console.WriteLine("\n--- PHASE 1: Create accounts, start mesh, create group, invite/join, exchange messages ---");
+            int rc1 = await RunChildPhaseAsync(dllPath, "1", testRoot).ConfigureAwait(false);
+            if (rc1 != 0)
+            {
+                Console.WriteLine($"[REOPEN-TEST] FAILED in Phase 1 (exit code {rc1}).");
+                return 1;
+            }
+
+            Console.WriteLine("\n--- PHASE 2: Reopen fresh app processes after exit, unlock accounts, start mesh, exchange messages ---");
+            int rc2 = await RunChildPhaseAsync(dllPath, "2", testRoot).ConfigureAwait(false);
+            if (rc2 != 0)
+            {
+                Console.WriteLine($"[REOPEN-TEST] FAILED in Phase 2 (exit code {rc2}).");
+                return 1;
+            }
+
+            Console.WriteLine("\n[REOPEN-TEST] SUCCESS: All messages arrived before and after full app exit & reopen!");
+            return 0;
+        }
+        finally
+        {
+            try { Directory.Delete(testRoot, recursive: true); } catch { }
+        }
+    }
+
+    private static async Task<int> RunChildPhaseAsync(string dllPath, string phase, string testRoot)
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo("dotnet")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        };
+        psi.ArgumentList.Add(dllPath);
+        psi.ArgumentList.Add("--test-reopen");
+        psi.ArgumentList.Add("--phase");
+        psi.ArgumentList.Add(phase);
+        psi.ArgumentList.Add(testRoot);
+
+        using var proc = System.Diagnostics.Process.Start(psi)!;
+        string stdout = await proc.StandardOutput.ReadToEndAsync().ConfigureAwait(false);
+        string stderr = await proc.StandardError.ReadToEndAsync().ConfigureAwait(false);
+        await proc.WaitForExitAsync().ConfigureAwait(false);
+
+        if (!string.IsNullOrWhiteSpace(stdout))
+        {
+            Console.Write(stdout);
+        }
+        if (!string.IsNullOrWhiteSpace(stderr))
+        {
+            Console.Error.Write(stderr);
+        }
+        return proc.ExitCode;
+    }
+
+    private static async Task<int> RunReopenPhase1Async(string sharedRoot)
+    {
+        string rootA = Path.Combine(sharedRoot, "alice");
+        string rootB = Path.Combine(sharedRoot, "bob");
+        string rootC = Path.Combine(sharedRoot, "charlie");
+
+        var tuiA = new NcursesTui(rootA, new AccountService(rootA));
+        var tuiB = new NcursesTui(rootB, new AccountService(rootB));
+        var tuiC = new NcursesTui(rootC, new AccountService(rootC));
+
+        await tuiA.InitializePersistenceAsync().ConfigureAwait(false);
+        await tuiB.InitializePersistenceAsync().ConfigureAwait(false);
+        await tuiC.InitializePersistenceAsync().ConfigureAwait(false);
+
+        // Test BOTH orders: tuiA does /mesh start BEFORE /account unlock; tuiB & tuiC do /account unlock BEFORE /mesh start
+        await tuiA.ProcessInputLineAsync("/account create Alice --no-password").ConfigureAwait(false);
+        await tuiA.ProcessInputLineAsync("/mesh start").ConfigureAwait(false);
+        await tuiA.ProcessInputLineAsync("/account unlock Alice").ConfigureAwait(false);
+
+        await tuiB.ProcessInputLineAsync("/account create Bob --no-password").ConfigureAwait(false);
+        await tuiB.ProcessInputLineAsync("/account unlock Bob").ConfigureAwait(false);
+        await tuiB.ProcessInputLineAsync("/mesh start").ConfigureAwait(false);
+
+        await tuiC.ProcessInputLineAsync("/account create Charlie --no-password").ConfigureAwait(false);
+        await tuiC.ProcessInputLineAsync("/account unlock Charlie").ConfigureAwait(false);
+        await tuiC.ProcessInputLineAsync("/mesh start").ConfigureAwait(false);
+
+        Console.WriteLine($"[Phase1] Alice   NodeId = {tuiA.SelfNodeId}");
+        Console.WriteLine($"[Phase1] Bob     NodeId = {tuiB.SelfNodeId}");
+        Console.WriteLine($"[Phase1] Charlie NodeId = {tuiC.SelfNodeId}");
+        if (tuiA.SelfNodeId is null || tuiB.SelfNodeId is null || tuiC.SelfNodeId is null ||
+            tuiA.SelfNodeId == tuiB.SelfNodeId || tuiA.SelfNodeId == tuiC.SelfNodeId || tuiB.SelfNodeId == tuiC.SelfNodeId)
+        {
+            Console.WriteLine("[Phase1] ERROR: Peers do not have distinct NodeIds!");
+            return 1;
+        }
+
+        await tuiA.ProcessInputLineAsync("/group create Voltaire").ConfigureAwait(false);
+        string groupId = tuiA.ActiveGroupId;
+        await tuiA.ProcessInputLineAsync("/group invite").ConfigureAwait(false);
+        string? inviteLink = tuiA.LastInviteLink;
+        if (string.IsNullOrWhiteSpace(inviteLink))
+        {
+            Console.WriteLine("[Phase1] ERROR: Failed to create invite link.");
+            return 1;
+        }
+
+        await tuiB.ProcessInputLineAsync($"/group join {inviteLink}").ConfigureAwait(false);
+        await tuiC.ProcessInputLineAsync($"/group join {inviteLink}").ConfigureAwait(false);
+
+        // Wait for Alice to receive both Bob's and Charlie's join requests
+        bool gotJoinReqs = await WaitUntilAsync(
+            () => tuiA.GovernanceService.GetPendingJoinRequests(new GroupId(groupId)).Count >= 2,
+            timeoutMs: 20000).ConfigureAwait(false);
+        if (!gotJoinReqs)
+        {
+            Console.WriteLine("[Phase1] ERROR: Alice did not receive both join requests.");
+            DumpLogs("Alice", tuiA);
+            DumpLogs("Bob", tuiB);
+            DumpLogs("Charlie", tuiC);
+            return 1;
+        }
+
+        await tuiA.ProcessInputLineAsync("/mod accept Bob").ConfigureAwait(false);
+        await tuiA.ProcessInputLineAsync("/mod accept Charlie").ConfigureAwait(false);
+
+        // Wait for Bob and Charlie to be synced into the group
+        bool allSynced = await WaitUntilAsync(
+            () => tuiB.ActiveGroupId == groupId && tuiC.ActiveGroupId == groupId,
+            timeoutMs: 20000).ConfigureAwait(false);
+        if (!allSynced)
+        {
+            Console.WriteLine("[Phase1] ERROR: Bob or Charlie did not receive RosterSync after /mod accept.");
+            DumpLogs("Alice", tuiA);
+            DumpLogs("Bob", tuiB);
+            DumpLogs("Charlie", tuiC);
+            return 1;
+        }
+
+        await tuiA.ProcessInputLineAsync("Msg1 from Alice in Phase 1").ConfigureAwait(false);
+        await tuiB.ProcessInputLineAsync("Msg2 from Bob in Phase 1").ConfigureAwait(false);
+        await tuiC.ProcessInputLineAsync("Msg3 from Charlie in Phase 1").ConfigureAwait(false);
+
+        string[] phase1Expected =
+        {
+            "Msg1 from Alice in Phase 1",
+            "Msg2 from Bob in Phase 1",
+            "Msg3 from Charlie in Phase 1"
+        };
+
+        bool phase1Converged = await WaitUntilAsync(
+            () => HasAllMessages(tuiA, groupId, phase1Expected) &&
+                  HasAllMessages(tuiB, groupId, phase1Expected) &&
+                  HasAllMessages(tuiC, groupId, phase1Expected),
+            timeoutMs: 25000).ConfigureAwait(false);
+
+        Console.WriteLine($"[Phase1] All 3 peers received all 3 Phase-1 messages: {phase1Converged}");
+        if (!phase1Converged)
+        {
+            DumpLogs("Alice", tuiA);
+            DumpLogs("Bob", tuiB);
+            DumpLogs("Charlie", tuiC);
+            return 1;
+        }
+
+        return 0;
+    }
+
+    private static async Task<int> RunReopenPhase2Async(string sharedRoot)
+    {
+        string rootA = Path.Combine(sharedRoot, "alice");
+        string rootB = Path.Combine(sharedRoot, "bob");
+        string rootC = Path.Combine(sharedRoot, "charlie");
+
+        var tuiA = new NcursesTui(rootA, new AccountService(rootA));
+        var tuiB = new NcursesTui(rootB, new AccountService(rootB));
+        var tuiC = new NcursesTui(rootC, new AccountService(rootC));
+
+        await tuiA.InitializePersistenceAsync().ConfigureAwait(false);
+        await tuiB.InitializePersistenceAsync().ConfigureAwait(false);
+        await tuiC.InitializePersistenceAsync().ConfigureAwait(false);
+
+        // Reopen: test both mesh-before-unlock (Alice) and unlock-before-mesh (Bob & Charlie)
+        await tuiA.ProcessInputLineAsync("/mesh start").ConfigureAwait(false);
+        await tuiA.ProcessInputLineAsync("/account unlock Alice").ConfigureAwait(false);
+
+        await tuiB.ProcessInputLineAsync("/account unlock Bob").ConfigureAwait(false);
+        await tuiB.ProcessInputLineAsync("/mesh start").ConfigureAwait(false);
+
+        await tuiC.ProcessInputLineAsync("/account unlock Charlie").ConfigureAwait(false);
+        await tuiC.ProcessInputLineAsync("/mesh start").ConfigureAwait(false);
+
+        Console.WriteLine($"[Phase2] Alice   NodeId = {tuiA.SelfNodeId}, ActiveGroup = {tuiA.ActiveGroupId}");
+        Console.WriteLine($"[Phase2] Bob     NodeId = {tuiB.SelfNodeId}, ActiveGroup = {tuiB.ActiveGroupId}");
+        Console.WriteLine($"[Phase2] Charlie NodeId = {tuiC.SelfNodeId}, ActiveGroup = {tuiC.ActiveGroupId}");
+
+        string groupId = tuiA.ActiveGroupId;
+        if (groupId == "general" || tuiB.ActiveGroupId != groupId || tuiC.ActiveGroupId != groupId)
+        {
+            Console.WriteLine($"[Phase2] ERROR: Group was not restored on reopen (Alice={tuiA.ActiveGroupId}, Bob={tuiB.ActiveGroupId}, Charlie={tuiC.ActiveGroupId}).");
+            DumpLogs("Alice", tuiA);
+            DumpLogs("Bob", tuiB);
+            DumpLogs("Charlie", tuiC);
+            return 1;
+        }
+
+        await tuiA.ProcessInputLineAsync("Msg4 from Alice AFTER REOPEN").ConfigureAwait(false);
+        await tuiB.ProcessInputLineAsync("Msg5 from Bob AFTER REOPEN").ConfigureAwait(false);
+        await tuiC.ProcessInputLineAsync("Msg6 from Charlie AFTER REOPEN").ConfigureAwait(false);
+
+        string[] allExpected =
+        {
+            "Msg1 from Alice in Phase 1",
+            "Msg2 from Bob in Phase 1",
+            "Msg3 from Charlie in Phase 1",
+            "Msg4 from Alice AFTER REOPEN",
+            "Msg5 from Bob AFTER REOPEN",
+            "Msg6 from Charlie AFTER REOPEN"
+        };
+
+        bool phase2Converged = await WaitUntilAsync(
+            () => HasAllMessages(tuiA, groupId, allExpected) &&
+                  HasAllMessages(tuiB, groupId, allExpected) &&
+                  HasAllMessages(tuiC, groupId, allExpected),
+            timeoutMs: 25000).ConfigureAwait(false);
+
+        Console.WriteLine($"[Phase2] All 3 peers converged on all 6 messages (Phase 1 + Phase 2): {phase2Converged}");
+
+        if (!phase2Converged)
+        {
+            DumpLogs("Alice", tuiA);
+            DumpLogs("Bob", tuiB);
+            DumpLogs("Charlie", tuiC);
+            return 1;
+        }
+
+        return 0;
+    }
+
+    private static bool HasAllMessages(NcursesTui tui, string groupId, IEnumerable<string> expectedSubstrings)
+    {
+        IReadOnlyList<string> actual = tui.GetRoomMessageContents(groupId);
+        return expectedSubstrings.All(exp => actual.Any(a => a.Contains(exp, StringComparison.Ordinal)));
+    }
+
+    private static async Task<bool> WaitUntilAsync(Func<bool> predicate, int timeoutMs)
+    {
+        int elapsed = 0;
+        while (elapsed < timeoutMs)
+        {
+            if (predicate())
+            {
+                return true;
+            }
+            await Task.Delay(200).ConfigureAwait(false);
+            elapsed += 200;
+        }
+        return predicate();
+    }
+
+    private static void DumpLogs(string label, NcursesTui tui)
+    {
+        Console.WriteLine($"=== LOGS ({label}) ===");
+        foreach (string line in tui.GetRecentLogLines(40))
+        {
+            Console.WriteLine("  " + line);
+        }
     }
 
     private static void PrintHelp()

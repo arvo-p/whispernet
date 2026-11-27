@@ -23,7 +23,8 @@ internal sealed record PersistedGroupVaultEntry(
     GroupId GroupId,
     string? OwnerPrivateKeyPkcs8Base64,
     GroupManifest CurrentManifest,
-    List<ModerationAction> MemberActions);
+    List<ModerationAction> MemberActions,
+    Dictionary<AuthorId, NodeId>? KnownAuthorNodes = null);
 
 /// <summary>
 /// Service applicatif gérant la création de groupes (paire ECDSA P-256 dédiée par groupe),
@@ -564,6 +565,7 @@ public sealed class GroupGovernanceService
             throw new InvalidOperationException($"Failed to admit member: {error}");
         }
 
+        GroupGovernanceEngine.CompactGovernanceLog(state);
         PendingRequestsChanged?.Invoke(state.GroupId);
         GovernanceStateChanged?.Invoke(state.GroupId);
         return admit;
@@ -612,6 +614,7 @@ public sealed class GroupGovernanceService
             throw new InvalidOperationException($"Moderation action rejected: {error}");
         }
 
+        GroupGovernanceEngine.CompactGovernanceLog(state);
         GovernanceStateChanged?.Invoke(state.GroupId);
         return action;
     }
@@ -642,11 +645,26 @@ public sealed class GroupGovernanceService
         string? ownerPrivateKeyPkcs8Base64 = null,
         CancellationToken cancellationToken = default)
     {
+        string? effectiveOwnerKey = ownerPrivateKeyPkcs8Base64;
+        if (string.IsNullOrWhiteSpace(effectiveOwnerKey))
+        {
+            try
+            {
+                PersistedGroupVaultEntry existing = await LoadVaultEntryAsync(session, state.GroupId, cancellationToken).ConfigureAwait(false);
+                effectiveOwnerKey = existing.OwnerPrivateKeyPkcs8Base64;
+            }
+            catch
+            {
+                // Pas d'entrée existante ou membre non-owner
+            }
+        }
+
         var entry = new PersistedGroupVaultEntry(
             GroupId: state.GroupId,
-            OwnerPrivateKeyPkcs8Base64: ownerPrivateKeyPkcs8Base64,
+            OwnerPrivateKeyPkcs8Base64: effectiveOwnerKey,
             CurrentManifest: state.CurrentManifest,
-            MemberActions: state.GovernanceLog.Values.ToList());
+            MemberActions: state.GovernanceLog.Values.ToList(),
+            KnownAuthorNodes: new Dictionary<AuthorId, NodeId>(state.KnownAuthorNodes));
 
         byte[] jsonBytes = JsonSerializer.SerializeToUtf8Bytes(entry, JsonOptions);
         await _accountService.WriteVaultFileAsync(
@@ -668,6 +686,18 @@ public sealed class GroupGovernanceService
             GroupGovernanceEngine.TryApplyModerationAction(state, action, _accountService.VerifySignature, out _, out _);
         }
 
+        GroupGovernanceEngine.CompactGovernanceLog(state);
+        if (entry.KnownAuthorNodes is not null)
+        {
+            foreach ((AuthorId authorId, NodeId nodeId) in entry.KnownAuthorNodes)
+            {
+                if (!state.KnownAuthorNodes.ContainsKey(authorId) &&
+                    state.GetMemberStatus(authorId) is MemberStatus.Admitted or MemberStatus.Silenced)
+                {
+                    state.KnownAuthorNodes[authorId] = nodeId;
+                }
+            }
+        }
         return state;
     }
 
@@ -706,7 +736,10 @@ public sealed class GroupGovernanceService
             }
         }
 
-        return loaded;
+        return loaded
+            .OrderBy(static g => g.CurrentManifest.IssuedAtUtc)
+            .ThenBy(static g => g.GroupId.Value, StringComparer.Ordinal)
+            .ToList();
     }
 
     private async Task<PersistedGroupVaultEntry> LoadVaultEntryAsync(

@@ -45,7 +45,8 @@ public sealed record ChatDagSyncBatch(
     GroupId GroupId,
     int BatchIndex,
     int TotalBatches,
-    IReadOnlyList<ChatEvent> Events);
+    IReadOnlyList<ChatEvent> Events,
+    NodeId? SenderNodeId = null);
 
 /// <summary>
 /// Enveloppe réseau multiplexée sur Iroh QUIC pour les messages de chat, demandes d'admission et synchro de groupe.
@@ -236,11 +237,23 @@ public sealed class GroupMeshService
                     return false;
                 }
             }
+
+            GroupGovernanceEngine.CompactGovernanceLog(govState);
         }
 
-        IEnumerable<NodeId>? bootstrap = payload.SenderNodeId is NodeId senderNode
-            ? new[] { senderNode }
-            : null;
+        IEnumerable<NodeId>? bootstrap = null;
+        if (payload.SenderNodeId is NodeId senderNode)
+        {
+            bootstrap = new[] { senderNode };
+            foreach (AuthorId memberAuthor in govState.MemberStates.Keys)
+            {
+                if (!govState.KnownAuthorNodes.ContainsKey(memberAuthor) &&
+                    govState.GetMemberStatus(memberAuthor) is MemberStatus.Admitted or MemberStatus.Silenced)
+                {
+                    govState.KnownAuthorNodes[memberAuthor] = senderNode;
+                }
+            }
+        }
         RegisterGroup(govState, bootstrap);
         error = null;
         return true;
@@ -328,7 +341,51 @@ public sealed class GroupMeshService
             AuthorId: senderAuthorId);
 
         byte[] payload = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(msg));
+        return await SendPayloadToTargetsAsync(targets, payload, ct).ConfigureAwait(false);
+    }
 
+    /// <summary>
+    /// Diffuse un <see cref="ChatEvent"/> signé (encapsulé en lot d'un élément sur le flux 0x02)
+    /// à tous les pairs actifs du groupe.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<NodeId, bool>> BroadcastChatEventAsync(
+        GroupId groupId,
+        ChatEvent evt,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(evt);
+
+        if (!_conversations.TryGetValue(groupId.Value, out NodeState? nodeState) ||
+            nodeState.HyParView.ActiveView.Count == 0)
+        {
+            return new Dictionary<NodeId, bool>();
+        }
+
+        if (_groupGovernance.TryGetValue(groupId.Value, out GroupGovernanceState? govState))
+        {
+            AuthorId authorId = evt.GetAuthorId();
+            if (!GroupGovernanceEngine.CanAuthorPost(govState, authorId))
+            {
+                throw new UnauthorizedAccessException($"Author {authorId} is not allowed to post in group {groupId}.");
+            }
+        }
+
+        var batch = new ChatDagSyncBatch(groupId, 0, 1, new[] { evt }, _transport.SelfId);
+        var packet = new GroupWirePacket(
+            GroupWirePacketKind.DagSyncBatch,
+            DagSyncBatch: batch,
+            StreamId: DagSyncStreamId);
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(packet);
+
+        List<NodeId> targets = nodeState.HyParView.ActiveView.ToList();
+        return await SendPayloadToTargetsAsync(targets, payload, ct).ConfigureAwait(false);
+    }
+
+    private async Task<IReadOnlyDictionary<NodeId, bool>> SendPayloadToTargetsAsync(
+        IReadOnlyList<NodeId> targets,
+        byte[] payload,
+        CancellationToken ct)
+    {
         // Charger les éventuels tickets déjà en cache SQLite pour accélérer la connexion avant le fallback DHT
         Dictionary<NodeId, CachedPeerEntry> cachedLookup = new();
         if (_peerCache is not null)
@@ -490,7 +547,7 @@ public sealed class GroupMeshService
 
         for (int i = 0; i < batches.Count; i++)
         {
-            var batch = new ChatDagSyncBatch(groupId, i, batches.Count, batches[i]);
+            var batch = new ChatDagSyncBatch(groupId, i, batches.Count, batches[i], _transport.SelfId);
             var packet = new GroupWirePacket(
                 GroupWirePacketKind.DagSyncBatch,
                 DagSyncBatch: batch,
@@ -538,10 +595,19 @@ public sealed class GroupMeshService
                     return;
 
                 case GroupWirePacketKind.DagSyncRequest when packet.DagSyncRequest is not null:
+                    if (_groupGovernance.TryGetValue(packet.DagSyncRequest.GroupId.Value, out GroupGovernanceState? reqGov))
+                    {
+                        RegisterGroup(reqGov, new[] { packet.DagSyncRequest.RequesterNodeId });
+                    }
                     DagSyncRequestReceived?.Invoke(packet.DagSyncRequest);
                     return;
 
                 case GroupWirePacketKind.DagSyncBatch when packet.DagSyncBatch is not null:
+                    if (packet.DagSyncBatch.SenderNodeId is NodeId batchSender &&
+                        _groupGovernance.TryGetValue(packet.DagSyncBatch.GroupId.Value, out GroupGovernanceState? batchGov))
+                    {
+                        RegisterGroup(batchGov, new[] { batchSender });
+                    }
                     DagSyncBatchReceived?.Invoke(packet.DagSyncBatch);
                     return;
             }
