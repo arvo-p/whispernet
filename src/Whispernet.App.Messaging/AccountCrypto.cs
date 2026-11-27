@@ -46,11 +46,7 @@ internal static class AccountCrypto
     /// <summary>
     /// Chiffre un bloc binaire avec AES-256-GCM au format [version:1][nonce:12][tag:16][ciphertext:N].
     /// </summary>
-    public static byte[] EncryptAesGcm(
-        ReadOnlySpan<byte> key,
-        ReadOnlySpan<byte> plaintext,
-        ReadOnlySpan<byte> associatedData)
-    {
+    public static byte[] EncryptAesGcm( ReadOnlySpan<byte> key, ReadOnlySpan<byte> plaintext, ReadOnlySpan<byte> associatedData){
         byte[] output = new byte[1 + NonceSizeBytes + TagSizeBytes + plaintext.Length];
         output[0] = BlobFormatVersion;
 

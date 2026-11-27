@@ -217,6 +217,10 @@ public sealed class GroupMeshService
         GroupId groupId = payload.Manifest.GroupId;
         if (!_groupGovernance.TryGetValue(groupId.Value, out GroupGovernanceState? govState))
         {
+            if (!GroupGovernanceEngine.TryValidateManifest(payload.Manifest, verifySignature, out error))
+            {
+                return false;
+            }
             govState = new GroupGovernanceState(payload.Manifest);
             _groupGovernance[groupId.Value] = govState;
         }

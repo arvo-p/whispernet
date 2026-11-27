@@ -2212,11 +2212,35 @@ internal sealed class NcursesTui
 
                     string gid = batch.GroupId.Value;
                     bool ok;
-                    string? err;
+                    string? err = null;
+                    List<ChatEvent> allowedEvents;
                     lock (_stateLock)
                     {
+                        if (_governedGroups.TryGetValue(gid, out GroupGovernanceState? govState))
+                        {
+                            if (govState.CurrentManifest.IsTerminated)
+                            {
+                                AddLog(LogTheme.Chat, $"Ignored DagSyncBatch for terminated group #{ShortId(gid)}.");
+                                return;
+                            }
+
+                            allowedEvents = batch.Events
+                                .Where(e => GroupGovernanceEngine.CanAuthorPost(govState, e.GetAuthorId()))
+                                .ToList();
+
+                            if (allowedEvents.Count == 0)
+                            {
+                                AddLog(LogTheme.Chat, $"Rejected DagSyncBatch for #{ShortId(gid)}: author(s) not admitted or silenced/banned.");
+                                return;
+                            }
+                        }
+                        else
+                        {
+                            allowedEvents = batch.Events.ToList();
+                        }
+
                         ChatRoomDagState dag = GetOrCreateRoomDagLocked(gid, Convert.FromHexString(gid));
-                        ok = _chatEventService.TryIngestBatch(dag, batch.Events, out err);
+                        ok = _chatEventService.TryIngestBatch(dag, allowedEvents, out err);
                         if (ok)
                         {
                             string title = _groupTitles.TryGetValue(gid, out string? t) ? t : gid;
@@ -2229,9 +2253,9 @@ internal sealed class NcursesTui
                     {
                         if (_chatHistoryRepo is not null)
                         {
-                            _ = _chatHistoryRepo.UpsertBatchAsync(batch.Events);
+                            _ = _chatHistoryRepo.UpsertBatchAsync(allowedEvents);
                         }
-                        AddLog(LogTheme.Chat, $"Synced {batch.Events.Count} ChatEvent(s) for #{ShortId(gid)} (batch {batch.BatchIndex + 1}/{batch.TotalBatches}).");
+                        AddLog(LogTheme.Chat, $"Synced {allowedEvents.Count} ChatEvent(s) for #{ShortId(gid)} (batch {batch.BatchIndex + 1}/{batch.TotalBatches}).");
                     }
                     else
                     {

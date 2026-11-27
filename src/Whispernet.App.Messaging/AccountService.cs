@@ -9,23 +9,20 @@ namespace Whispernet.App.Messaging;
 /// Gestionnaire de comptes locaux Whispernet avec identité ECDSA P-256,
 /// dérivation de l'AuthorId par SHA-256 et chiffrement symétrique optionnel (PBKDF2 + AES-256-GCM).
 /// </summary>
-public sealed class AccountService : IAccountService
-{
+public sealed class AccountService : IAccountService{
     private const string ProfileFileName = "profile.json";
     private const string PlainKeyFileName = "identity.key";
     private const string EncryptedKeyFileName = "identity.key.enc";
     private const string EncryptedDekFileName = "folder.dek.enc";
     private const string VaultDirectoryName = "vault";
 
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
+    private static readonly JsonSerializerOptions JsonOptions = new(){
         WriteIndented = true
     };
 
     private readonly string _rootDirectory;
 
-    public AccountService(string? rootDirectory = null)
-    {
+    public AccountService(string? rootDirectory = null){
         _rootDirectory = string.IsNullOrWhiteSpace(rootDirectory)
             ? WhispernetPaths.GetDataDirectory()
             : Path.GetFullPath(rootDirectory);
@@ -34,8 +31,8 @@ public sealed class AccountService : IAccountService
     public async Task<AccountProfile> CreateAccountAsync(
         string username,
         string? password = null,
-        CancellationToken cancellationToken = default)
-    {
+        CancellationToken cancellationToken = default){
+
         string normalizedUsername = ValidateAndNormalizeUsername(username);
         bool hasPassword = !string.IsNullOrEmpty(password);
 
@@ -43,8 +40,7 @@ public sealed class AccountService : IAccountService
         byte[] publicKeySpki = ecdsa.ExportSubjectPublicKeyInfo();
         byte[] privateKeyPkcs8 = ecdsa.ExportPkcs8PrivateKey();
 
-        try
-        {
+        try{
             AuthorId authorId = AccountCrypto.ComputeAuthorId(publicKeySpki);
             string accountsDir = WhispernetPaths.GetAccountsDirectory(_rootDirectory);
             string accountDir = WhispernetPaths.GetAccountDirectory(authorId, _rootDirectory);
@@ -58,14 +54,12 @@ public sealed class AccountService : IAccountService
             string? saltBase64 = null;
             int iterations = 0;
 
-            if (hasPassword)
-            {
+            if (hasPassword){
                 byte[] salt = RandomNumberGenerator.GetBytes(AccountCrypto.SaltSizeBytes);
                 byte[] dek = RandomNumberGenerator.GetBytes(AccountCrypto.KeySizeBytes);
                 byte[] kek = AccountCrypto.DeriveKeyFromPassword(password!, salt, AccountCrypto.DefaultKdfIterations);
 
-                try
-                {
+                try{
                     byte[] encryptedKey = AccountCrypto.EncryptAesGcm(
                         kek,
                         privateKeyPkcs8,
@@ -87,14 +81,14 @@ public sealed class AccountService : IAccountService
                     saltBase64 = Convert.ToBase64String(salt);
                     iterations = AccountCrypto.DefaultKdfIterations;
                 }
-                finally
-                {
+
+                finally{
                     CryptographicOperations.ZeroMemory(kek);
                     CryptographicOperations.ZeroMemory(dek);
                 }
             }
-            else
-            {
+
+            else{
                 await WriteSecureFileAsync(
                     Path.Combine(accountDir, PlainKeyFileName),
                     privateKeyPkcs8,
@@ -118,8 +112,7 @@ public sealed class AccountService : IAccountService
 
             return profile;
         }
-        finally
-        {
+        finally{
             CryptographicOperations.ZeroMemory(privateKeyPkcs8);
         }
     }
@@ -127,19 +120,16 @@ public sealed class AccountService : IAccountService
     public async Task<AccountSession> UnlockAccountAsync(
         AuthorId authorId,
         string? password = null,
-        CancellationToken cancellationToken = default)
-    {
+        CancellationToken cancellationToken = default){
+
         if (!authorId.IsValid)
-        {
             throw new ArgumentException("Invalid AuthorId.", nameof(authorId));
-        }
 
         string accountDir = WhispernetPaths.GetAccountDirectory(authorId, _rootDirectory);
         string profilePath = Path.Combine(accountDir, ProfileFileName);
+
         if (!File.Exists(profilePath))
-        {
             throw new FileNotFoundException($"Account not found for AuthorId {authorId}.", profilePath);
-        }
 
         byte[] profileBytes = await File.ReadAllBytesAsync(profilePath, cancellationToken).ConfigureAwait(false);
         AccountProfile profile = JsonSerializer.Deserialize<AccountProfile>(profileBytes, JsonOptions)
@@ -148,28 +138,22 @@ public sealed class AccountService : IAccountService
         byte[]? privateKeyPkcs8 = null;
         byte[]? dek = null;
 
-        try
-        {
-            if (profile.IsPasswordProtected)
-            {
+        try{
+            if (profile.IsPasswordProtected){
                 if (string.IsNullOrEmpty(password))
-                {
                     throw new CryptographicException("A password is required to unlock this account.");
-                }
 
                 if (string.IsNullOrWhiteSpace(profile.KdfSaltBase64) || profile.KdfIterations <= 0)
-                {
                     throw new InvalidDataException("Missing or invalid KDF parameters in account profile.");
-                }
 
                 byte[] salt = Convert.FromBase64String(profile.KdfSaltBase64);
                 byte[] kek = AccountCrypto.DeriveKeyFromPassword(password, salt, profile.KdfIterations);
 
-                try
-                {
+                try{
                     byte[] encKeyBytes = await File.ReadAllBytesAsync(
                         Path.Combine(accountDir, EncryptedKeyFileName),
                         cancellationToken).ConfigureAwait(false);
+					
                     byte[] encDekBytes = await File.ReadAllBytesAsync(
                         Path.Combine(accountDir, EncryptedDekFileName),
                         cancellationToken).ConfigureAwait(false);
@@ -177,74 +161,51 @@ public sealed class AccountService : IAccountService
                     privateKeyPkcs8 = AccountCrypto.DecryptAesGcm(kek, encKeyBytes, BuildPrivateKeyAad(authorId));
                     dek = AccountCrypto.DecryptAesGcm(kek, encDekBytes, BuildFolderDekAad(authorId));
                 }
-                finally
-                {
+                finally{
                     CryptographicOperations.ZeroMemory(kek);
                 }
-            }
-            else
-            {
-                privateKeyPkcs8 = await File.ReadAllBytesAsync(
-                    Path.Combine(accountDir, PlainKeyFileName),
-                    cancellationToken).ConfigureAwait(false);
-            }
+            } else privateKeyPkcs8 = await File.ReadAllBytesAsync( Path.Combine(accountDir, PlainKeyFileName), cancellationToken).ConfigureAwait(false); 
 
             var ecdsa = ECDsa.Create();
-            try
-            {
+            try{
                 ecdsa.ImportPkcs8PrivateKey(privateKeyPkcs8, out _);
                 var session = new AccountSession(profile, accountDir, ecdsa, dek);
                 dek = null; // Transféré à AccountSession qui le zéroïsera dans Dispose()
                 return session;
             }
-            catch
-            {
+            catch{
                 ecdsa.Dispose();
                 throw;
             }
         }
-        catch
-        {
+        catch{
             if (dek is not null)
-            {
                 CryptographicOperations.ZeroMemory(dek);
-            }
 
             throw;
         }
-        finally
-        {
+        finally{
             if (privateKeyPkcs8 is not null)
-            {
                 CryptographicOperations.ZeroMemory(privateKeyPkcs8);
-            }
         }
     }
 
-    public async Task<IReadOnlyList<AccountProfile>> ListAccountsAsync(CancellationToken cancellationToken = default)
-    {
+    public async Task<IReadOnlyList<AccountProfile>> ListAccountsAsync(CancellationToken cancellationToken = default){
         string accountsDir = WhispernetPaths.GetAccountsDirectory(_rootDirectory);
         if (!Directory.Exists(accountsDir))
-        {
             return Array.Empty<AccountProfile>();
-        }
 
         var results = new List<AccountProfile>();
-        foreach (string dir in Directory.EnumerateDirectories(accountsDir))
-        {
+        foreach (string dir in Directory.EnumerateDirectories(accountsDir)){
             cancellationToken.ThrowIfCancellationRequested();
             string profilePath = Path.Combine(dir, ProfileFileName);
             if (!File.Exists(profilePath))
-            {
                 continue;
-            }
 
             byte[] bytes = await File.ReadAllBytesAsync(profilePath, cancellationToken).ConfigureAwait(false);
             AccountProfile? profile = JsonSerializer.Deserialize<AccountProfile>(bytes, JsonOptions);
             if (profile is not null)
-            {
                 results.Add(profile);
-            }
         }
 
         return results;
@@ -254,8 +215,8 @@ public sealed class AccountService : IAccountService
         AccountSession session,
         string relativePath,
         ReadOnlyMemory<byte> plaintext,
-        CancellationToken cancellationToken = default)
-    {
+        CancellationToken cancellationToken = default){
+
         ArgumentNullException.ThrowIfNull(session);
         (string fullPath, string normalizedRelative) = ResolveVaultFilePath(session.AccountDirectory, relativePath);
 
@@ -284,8 +245,7 @@ public sealed class AccountService : IAccountService
         (string fullPath, string normalizedRelative) = ResolveVaultFilePath(session.AccountDirectory, relativePath);
 
         byte[] diskBytes = await File.ReadAllBytesAsync(fullPath, cancellationToken).ConfigureAwait(false);
-        if (!session.IsFolderEncrypted)
-        {
+        if (!session.IsFolderEncrypted){
             return diskBytes;
         }
 

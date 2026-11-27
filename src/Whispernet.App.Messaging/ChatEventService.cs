@@ -7,12 +7,10 @@ namespace Whispernet.App.Messaging;
 /// Service applicatif reliant la signature ECDSA P-256 des comptes (<see cref="AccountSession"/>)
 /// au moteur de DAG causal (<see cref="CausalDagEngine"/>).
 /// </summary>
-public sealed class ChatEventService
-{
+public sealed class ChatEventService{
     private readonly IAccountService _accountService;
 
-    public ChatEventService(IAccountService accountService)
-    {
+    public ChatEventService(IAccountService accountService){
         _accountService = accountService ?? throw new ArgumentNullException(nameof(accountService));
     }
 
@@ -20,13 +18,11 @@ public sealed class ChatEventService
     /// Crée et signe un nouveau <see cref="ChatEvent"/> à partir des parents et de l'horloge de Lamport fournis.
     /// </summary>
     public ChatEvent CreateSignedEvent(
-        AccountSession session,
-        byte[] roomId,
+        AccountSession session, byte[] roomId,
         IReadOnlyList<byte[]> parents,
-        ulong logicalClock,
-        ulong timestampMs,
-        string content)
-    {
+        ulong logicalClock, ulong timestampMs,
+        string content){
+
         ArgumentNullException.ThrowIfNull(session);
         byte[] payload = Encoding.UTF8.GetBytes(content);
         byte[] authorPubKey = Convert.FromBase64String(session.Profile.PublicKeySpkiBase64);
@@ -55,21 +51,13 @@ public sealed class ChatEventService
     /// <summary>
     /// Vérifie et insère un <see cref="ChatEvent"/> dans le DAG du salon en retriant l'historique.
     /// </summary>
-    public bool TryIngestEvent(ChatRoomDagState roomState, ChatEvent evt, out string? error)
-    {
-        return CausalDagEngine.TryIngestEvent(
-            roomState,
-            evt,
-            _accountService.VerifySignature,
-            out error);
+    public bool TryIngestEvent(ChatRoomDagState roomState, ChatEvent evt, out string? error){
+        return CausalDagEngine.TryIngestEvent( roomState, evt,
+            _accountService.VerifySignature, out error);
     }
 
-    public bool TryIngestBatch(ChatRoomDagState roomState, IEnumerable<ChatEvent> events, out string? error)
-    {
-        return CausalDagEngine.TryIngestBatch(
-            roomState,
-            events,
-            _accountService.VerifySignature,
-            out error);
+    public bool TryIngestBatch(ChatRoomDagState roomState, IEnumerable<ChatEvent> events, out string? error) {
+        return CausalDagEngine.TryIngestBatch( roomState, events,
+            _accountService.VerifySignature, out error);
     }
 }

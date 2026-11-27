@@ -680,6 +680,10 @@ public sealed class GroupGovernanceService
         CancellationToken cancellationToken = default)
     {
         PersistedGroupVaultEntry entry = await LoadVaultEntryAsync(session, groupId, cancellationToken).ConfigureAwait(false);
+        if (!GroupGovernanceEngine.TryValidateManifest(entry.CurrentManifest, _accountService.VerifySignature, out string? manifestErr))
+        {
+            throw new InvalidDataException($"Invalid group manifest signature/ownership for {groupId}: {manifestErr}");
+        }
         var state = new GroupGovernanceState(entry.CurrentManifest);
         foreach (ModerationAction action in entry.MemberActions.OrderBy(static a => a.LamportClock))
         {

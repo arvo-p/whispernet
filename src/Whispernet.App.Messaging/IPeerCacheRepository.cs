@@ -6,8 +6,7 @@ namespace Whispernet.App.Messaging;
 /// Contrat de persistance du cache de pairs (Peer Cache) permettant à un nœud
 /// de conserver ses pairs connus (SQLite) et de se reconnecter au réseau après un redémarrage.
 /// </summary>
-public interface IPeerCacheRepository
-{
+public interface IPeerCacheRepository{
     /// <summary>
     /// Initialise le schéma de la table <c>peer_cache</c> dans la base SQLite locale.
     /// </summary>

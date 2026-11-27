@@ -142,6 +142,45 @@ Lorsqu'un utilisateur définit un mot de passe optionnel à la création du comp
     \end{itemize}
 \end{itemize}
 
+\section{Audit des vérifications d'intégrité et de propriété}
+
+Un audit complet de la chaîne de validation (couches \texttt{Whispernet.Core}, \texttt{Whispernet.App.Messaging} et \texttt{Whispernet.Client.Linux}) garantit que chaque structure reçue du réseau ou rechargée depuis le disque fait l'objet d'une vérification cryptographique systématique de son \textbf{intégrité} et de sa \textbf{propriété} (\emph{ownership}) à l'ingestion initiale, lors des mises à jour et lors du rejeu causal.
+
+\subsection{1. Événements du DAG causal (\texttt{CausalDagEngine} \& \texttt{ChatEvent})}
+À chaque ingestion unitaire (\texttt{CausalDagEngine.TryIngestEvent}) ou par lot sur le flux \texttt{0x02} (\texttt{CausalDagEngine.TryIngestBatch}) :
+\begin{itemize}
+    \item \textbf{Ancrage de portée (\texttt{ScopeId} / \texttt{RoomId})} : \texttt{evt.ScopeId} (32 octets) doit correspondre exactement au \texttt{ScopeId} du \texttt{CausalDagState<TEvent>} cible.
+    \item \textbf{Intégrité adressée par le contenu} : \texttt{evt.EventId} (32 octets) doit être égal à \texttt{SHA-256(Parents || Payload)} calculé via \texttt{CausalDagEngine.ComputeEventId}.
+    \item \textbf{Bornes et causalité des parents} : nombre de parents $\le 15$, identifiants de 32 octets sans doublon, et monotonie stricte de l'horloge de Lamport (\texttt{evt.LogicalClock > parent.LogicalClock}), vérifiée aussi bien pour les parents déjà connus que pour les parents arrivant en retard par rapport à leurs enfants.
+    \item \textbf{Signature et propriété de l'auteur} : la signature ECDSA P-256 (\texttt{evt.Signature}) est vérifiée avec \texttt{evt.AuthorPublicKey} sur \texttt{evt.BuildSignableBytes()}, et l'identité d'auteur est dérivée de manière auto-certifiante par \texttt{AuthorId = SHA-256(AuthorPublicKey)}.
+    \item \textbf{Filtrage des permissions de groupe à la réception} : lors de la réception d'un \texttt{ChatDagSyncBatch} pour un groupe gouverné (\texttt{NcursesTui.cs}), les événements sont filtrés via \texttt{GroupGovernanceEngine.CanAuthorPost(govState, evt.GetAuthorId())}, rejetant tout événement issu d'un auteur non admis, réduit au silence (\texttt{Silenced}), banni (\texttt{Banned}) ou ciblant un groupe fermé (\texttt{IsTerminated}).
+\end{itemize}
+
+\subsection{2. Propriété et intégrité du manifeste de groupe (\texttt{GroupManifest})}
+La méthode \texttt{GroupGovernanceEngine.TryValidateManifest} (appelée à la fois lors des mises à jour via \texttt{TryApplyManifest}, lors de la découverte initiale d'un groupe via \texttt{GroupMeshService.ApplySyncPayload} et lors du rechargement depuis le coffre via \texttt{GroupGovernanceService.LoadGroupFromVaultAsync}) vérifie :
+\begin{itemize}
+    \item \textbf{Propriété auto-certifiante du \texttt{GroupId}} : \texttt{GroupId.FromOwnerPublicKeySpki(ownerPubKey)} (\texttt{SHA-256(OwnerPublicKeySpki)}) doit être strictement égal à \texttt{manifest.GroupId}.
+    \item \textbf{Signature ECDSA de l'administrateur} : \texttt{manifest.OwnerSignatureBase64} est vérifiée avec \texttt{OwnerPublicKeySpkiBase64} sur \texttt{manifest.BuildSignableBytes()} (couvrant \texttt{GroupId}, \texttt{Version}, \texttt{Title}, sel/vérificateur PBKDF2 du mot de passe, \texttt{EphemeralMessageTtl}, \texttt{IsTerminated}, clés des modérateurs initiaux, \texttt{IssuedAtUtc}, \texttt{CheckpointLamportClock} et \texttt{CheckpointMemberStates}).
+    \item \textbf{Correspondance clé publique $\leftrightarrow$ \texttt{AuthorId} des modérateurs} : pour chaque entrée \texttt{(modId, modPubKey)} de \texttt{ModeratorPublicKeysSpkiBase64}, \texttt{SHA-256(modPubKey)} doit être égal à \texttt{modId}.
+    \item \textbf{Monotonie et irréversibilité} : lors d'une mise à jour (\texttt{TryApplyManifest}), \texttt{manifest.Version > state.CurrentManifest.Version} est exigé et toute modification d'un groupe déjà terminé (\texttt{IsTerminated == true}) est refusée.
+\end{itemize}
+
+\subsection{3. Autorité, propriété de la cible et rejeu causal des actions de modération (\texttt{ModerationAction})}
+Lors de l'application d'une décision (\texttt{GroupGovernanceEngine.TryApplyModerationAction}) :
+\begin{itemize}
+    \item \textbf{Autorité du signataire} : \texttt{TryResolveKnownSignerPublicKey} vérifie que \texttt{action.SignerAuthorId} possède une clé d'autorité reconnue (propriétaire du groupe ou modérateur connu), et impose que les actions \texttt{PromoteModerator} et \texttt{DemoteModerator} soient signées \textbf{exclusivement} par la clé d'autorité propriétaire du groupe (\texttt{isOwner == true}).
+    \item \textbf{Liaison cryptographique de la cible (\texttt{TargetAuthorId})} : \texttt{action.TargetPublicKeySpkiBase64} (obligatoire pour \texttt{PromoteModerator} et vérifiée dès qu'elle est fournie) doit être un SPKI Base64 valide dont le condensat \texttt{SHA-256} est égal à \texttt{action.TargetAuthorId}, empêchant toute association d'une clé publique tierce à un \texttt{AuthorId} existant.
+    \item \textbf{Signature ECDSA et cohérence du checkpoint} : \texttt{action.SignatureBase64} est vérifiée sur \texttt{action.BuildSignableBytes()}, avec \texttt{action.LamportClock > CheckpointLamportClock} et \texttt{action.ManifestVersion <= CurrentManifest.Version}.
+    \item \textbf{Rejeu topologique et révocation rétroactive (\texttt{RebuildAndReplayGovernanceLog})} : le journal de gouvernance est trié topologiquement depuis le dernier checkpoint ; si un modérateur est révoqué (\texttt{DemoteModerator}) à l'horloge $L_{\mathrm{demote}}$, toutes ses décisions ayant $L \ge L_{\mathrm{demote}}$ sont automatiquement invalidées lors du rejeu, même si la révocation arrive en retard sur le réseau.
+\end{itemize}
+
+\subsection{4. Demandes d'admission et jetons de pré-approbation (\texttt{JoinApprovalRequest} \& \texttt{InvitePreApprovalTicket})}
+Dans \texttt{GroupGovernanceService.TryProcessJoinApprovalRequest} :
+\begin{itemize}
+    \item \textbf{Propriété du demandeur} : \texttt{SHA-256(RequesterPublicKeySpki)} doit être égal à \texttt{RequesterAuthorId}, et \texttt{RequesterSignatureBase64} est vérifiée sur \texttt{request.BuildSignableBytes()}.
+    \item \textbf{Validité du jeton d'invitation pré-approuvé} : si un \texttt{InvitePreApprovalTicket} est présenté, son \texttt{GroupId}, son éventuel \texttt{AllowedAuthorId} et sa date d'expiration (\texttt{ExpiresAtUtc}) sont vérifiés, son signataire (\texttt{IssuerAuthorId}) doit être un modérateur actif ou le propriétaire du groupe, et sa signature ECDSA est validée sur \texttt{ticket.BuildSignableBytes()}.
+\end{itemize}
+
 \section{Synthèse des primitives et méthodes}
 
 \begin{center}

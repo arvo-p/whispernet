@@ -16,33 +16,21 @@ public static class GroupGovernanceEngine
         ReadOnlySpan<byte> signature);
 
     /// <summary>
-    /// Valide et applique une nouvelle version du manifeste (y compris un éventuel checkpoint compacté).
+    /// Vérifie l'intégrité cryptographique et la propriété d'un <see cref="GroupManifest"/> :
+    /// <c>GroupId == SHA256(OwnerPublicKeySpki)</c>, signature ECDSA de l'owner,
+    /// et <c>AuthorId == SHA256(ModeratorPublicKeySpki)</c> pour chaque modérateur initial.
     /// </summary>
-    public static bool TryApplyManifest(
-        GroupGovernanceState state,
+    public static bool TryValidateManifest(
         GroupManifest manifest,
         SignatureVerifier verifySignature,
         out string? error)
     {
-        ArgumentNullException.ThrowIfNull(state);
         ArgumentNullException.ThrowIfNull(manifest);
         ArgumentNullException.ThrowIfNull(verifySignature);
 
-        if (manifest.GroupId != state.GroupId)
+        if (!manifest.GroupId.IsValid)
         {
-            error = "Manifest GroupId does not match this group.";
-            return false;
-        }
-
-        if (state.CurrentManifest.IsTerminated)
-        {
-            error = "Group is permanently terminated and cannot accept manifest updates.";
-            return false;
-        }
-
-        if (manifest.Version <= state.CurrentManifest.Version)
-        {
-            error = $"Manifest version ({manifest.Version}) must be greater than current version ({state.CurrentManifest.Version}).";
+            error = "Manifest GroupId is invalid.";
             return false;
         }
 
@@ -59,7 +47,7 @@ public static class GroupGovernanceEngine
             return false;
         }
 
-        if (GroupId.FromOwnerPublicKeySpki(ownerPubKey) != state.GroupId)
+        if (GroupId.FromOwnerPublicKeySpki(ownerPubKey) != manifest.GroupId)
         {
             error = "Owner public key hash does not match GroupId.";
             return false;
@@ -90,6 +78,46 @@ public static class GroupGovernanceEngine
                 error = $"Moderator public key does not match AuthorId {modId}.";
                 return false;
             }
+        }
+
+        error = null;
+        return true;
+    }
+
+    /// <summary>
+    /// Valide et applique une nouvelle version du manifeste (y compris un éventuel checkpoint compacté).
+    /// </summary>
+    public static bool TryApplyManifest(
+        GroupGovernanceState state,
+        GroupManifest manifest,
+        SignatureVerifier verifySignature,
+        out string? error)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        ArgumentNullException.ThrowIfNull(manifest);
+        ArgumentNullException.ThrowIfNull(verifySignature);
+
+        if (manifest.GroupId != state.GroupId)
+        {
+            error = "Manifest GroupId does not match this group.";
+            return false;
+        }
+
+        if (state.CurrentManifest.IsTerminated)
+        {
+            error = "Group is permanently terminated and cannot accept manifest updates.";
+            return false;
+        }
+
+        if (manifest.Version <= state.CurrentManifest.Version)
+        {
+            error = $"Manifest version ({manifest.Version}) must be greater than current version ({state.CurrentManifest.Version}).";
+            return false;
+        }
+
+        if (!TryValidateManifest(manifest, verifySignature, out error))
+        {
+            return false;
         }
 
         state.CurrentManifest = manifest;
@@ -164,6 +192,32 @@ public static class GroupGovernanceEngine
         if (action.Parents is not null && action.Parents.Count > ModerationAction.MaxParents)
         {
             error = $"Governance action exceeds {ModerationAction.MaxParents} parents.";
+            return false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(action.TargetPublicKeySpkiBase64))
+        {
+            byte[] targetPubKey;
+            try
+            {
+                targetPubKey = Convert.FromBase64String(action.TargetPublicKeySpkiBase64);
+            }
+            catch (FormatException)
+            {
+                error = "Invalid Base64 TargetPublicKeySpkiBase64 on ModerationAction.";
+                return false;
+            }
+
+            var derivedTargetId = new AuthorId(Convert.ToHexStringLower(SHA256.HashData(targetPubKey)));
+            if (derivedTargetId != action.TargetAuthorId)
+            {
+                error = $"TargetPublicKeySpkiBase64 hash ({derivedTargetId}) does not match TargetAuthorId ({action.TargetAuthorId}).";
+                return false;
+            }
+        }
+        else if (action.Kind == GovernanceActionKind.PromoteModerator)
+        {
+            error = "PromoteModerator action requires a valid TargetPublicKeySpkiBase64.";
             return false;
         }
 

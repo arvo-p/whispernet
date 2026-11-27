@@ -10,8 +10,7 @@ namespace Whispernet.App.Messaging;
 /// Utilise directement l'API C standard de SQLite3 (<c>libsqlite3</c> / <c>e_sqlite3</c> / <c>sqlite3</c>)
 /// pour ne nécessiter aucune dépendance NuGet lourde tout en stockant une vraie base SQLite relationnelle.
 /// </summary>
-public sealed class SqlitePeerCacheRepository : IPeerCacheRepository
-{
+public sealed class SqlitePeerCacheRepository : IPeerCacheRepository{
     private readonly string _databasePath;
     private readonly SemaphoreSlim _mutex = new(1, 1);
 

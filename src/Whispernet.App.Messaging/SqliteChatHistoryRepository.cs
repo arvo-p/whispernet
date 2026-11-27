@@ -13,22 +13,17 @@ public sealed class SqliteChatHistoryRepository
     private readonly string _databasePath;
     private readonly SemaphoreSlim _mutex = new(1, 1);
 
-    public SqliteChatHistoryRepository(string databasePath)
-    {
+    public SqliteChatHistoryRepository(string databasePath){
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         _databasePath = databasePath;
     }
 
-    public async Task InitializeAsync(CancellationToken ct = default)
-    {
+    public async Task InitializeAsync(CancellationToken ct = default){
         await _mutex.WaitAsync(ct).ConfigureAwait(false);
-        try
-        {
+        try{
             string? dir = Path.GetDirectoryName(_databasePath);
             if (!string.IsNullOrEmpty(dir))
-            {
                 Directory.CreateDirectory(dir);
-            }
 
             using var db = SqliteNativeConnection.Open(_databasePath);
             db.ExecuteNonQuery("""
@@ -47,44 +42,35 @@ public sealed class SqliteChatHistoryRepository
                 ON chat_events (room_id, logical_clock ASC, timestamp_ms ASC, event_id ASC);
                 """);
         }
-        finally
-        {
+        finally{
             _mutex.Release();
         }
     }
 
-    public Task UpsertEventAsync(ChatEvent evt, string authorName = "", CancellationToken ct = default)
-    {
+    public Task UpsertEventAsync(ChatEvent evt, string authorName = "", CancellationToken ct = default){
         ArgumentNullException.ThrowIfNull(evt);
         return UpsertBatchAsync(new[] { (evt, authorName) }, ct);
     }
 
-    public Task UpsertBatchAsync(IEnumerable<ChatEvent> events, CancellationToken ct = default)
-    {
+    public Task UpsertBatchAsync(IEnumerable<ChatEvent> events, CancellationToken ct = default){
         ArgumentNullException.ThrowIfNull(events);
         return UpsertBatchAsync(events.Select(static e => (e, string.Empty)), ct);
     }
 
     public async Task UpsertBatchAsync(
         IEnumerable<(ChatEvent Event, string AuthorName)> events,
-        CancellationToken ct = default)
-    {
+        CancellationToken ct = default){
+
         ArgumentNullException.ThrowIfNull(events);
         List<(ChatEvent Event, string AuthorName)> list = events.ToList();
-        if (list.Count == 0)
-        {
-            return;
-        }
+        if (list.Count == 0) return;
 
         await _mutex.WaitAsync(ct).ConfigureAwait(false);
-        try
-        {
+        try{
             using var db = SqliteNativeConnection.Open(_databasePath);
             db.ExecuteNonQuery("BEGIN TRANSACTION;");
-            try
-            {
-                foreach ((ChatEvent evt, string authorName) in list)
-                {
+            try{
+                foreach ((ChatEvent evt, string authorName) in list){
                     string parentsJson = JsonSerializer.Serialize(
                         evt.Parents.Select(static p => Convert.ToHexStringLower(p)).ToArray());
 
@@ -113,20 +99,17 @@ public sealed class SqliteChatHistoryRepository
                 }
                 db.ExecuteNonQuery("COMMIT;");
             }
-            catch
-            {
+            catch{
                 db.ExecuteNonQuery("ROLLBACK;");
                 throw;
             }
         }
-        finally
-        {
+        finally{
             _mutex.Release();
         }
     }
 
-    public async Task<IReadOnlyList<(ChatEvent Event, string AuthorName)>> LoadAllEventsAsync(CancellationToken ct = default)
-    {
+    public async Task<IReadOnlyList<(ChatEvent Event, string AuthorName)>> LoadAllEventsAsync(CancellationToken ct = default){
         await _mutex.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -173,8 +156,7 @@ public sealed class SqliteChatHistoryRepository
 
             return results;
         }
-        finally
-        {
+        finally{
             _mutex.Release();
         }
     }
