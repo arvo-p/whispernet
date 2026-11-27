@@ -21,7 +21,8 @@ public sealed class ChatEventService{
         AccountSession session, byte[] roomId,
         IReadOnlyList<byte[]> parents,
         ulong logicalClock, ulong timestampMs,
-        string content){
+        string content,
+        byte[]? channelId = null){
 
         ArgumentNullException.ThrowIfNull(session);
         byte[] payload = Encoding.UTF8.GetBytes(content);
@@ -34,7 +35,8 @@ public sealed class ChatEventService{
             parents,
             logicalClock,
             timestampMs,
-            payload);
+            payload,
+            channelId);
         byte[] signature = _accountService.SignData(session, signable);
 
         return new ChatEvent(
@@ -45,7 +47,8 @@ public sealed class ChatEventService{
             LogicalClock: logicalClock,
             TimestampMs: timestampMs,
             Payload: payload,
-            Signature: signature);
+            Signature: signature,
+            ChannelId: channelId);
     }
 
     /// <summary>

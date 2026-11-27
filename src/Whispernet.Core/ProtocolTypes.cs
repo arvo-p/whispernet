@@ -66,6 +66,95 @@ public readonly record struct GroupId(string Value)
 }
 
 /// <summary>
+/// Identifiant cryptographique d'un canal à l'intérieur d'un groupe (SHA-256 hexadécimal de <c>"{groupId}:#{normalizedName}"</c>).
+/// </summary>
+[JsonConverter(typeof(ChannelIdJsonConverter))]
+public readonly record struct ChannelId(string Value)
+{
+    public const string DefaultGeneralName = "general";
+
+    public bool IsValid =>
+        !string.IsNullOrWhiteSpace(Value) &&
+        Value.Length == 64 &&
+        Value.All(static c => c is (>= '0' and <= '9') or (>= 'a' and <= 'f'));
+
+    public static string NormalizeName(string rawName)
+    {
+        if (string.IsNullOrWhiteSpace(rawName))
+        {
+            throw new ArgumentException("Channel name cannot be empty.", nameof(rawName));
+        }
+
+        string trimmed = rawName.Trim().TrimStart('#').Trim().ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(trimmed))
+        {
+            throw new ArgumentException("Channel name cannot be empty.", nameof(rawName));
+        }
+
+        var sb = new System.Text.StringBuilder(trimmed.Length);
+        foreach (char c in trimmed)
+        {
+            if (char.IsLetterOrDigit(c) || c is '-' or '_')
+            {
+                sb.Append(c);
+            }
+            else if (char.IsWhiteSpace(c) && sb.Length > 0 && sb[^1] != '-')
+            {
+                sb.Append('-');
+            }
+        }
+
+        string normalized = sb.ToString().Trim('-');
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            throw new ArgumentException($"Invalid channel name '{rawName}'.", nameof(rawName));
+        }
+
+        return normalized;
+    }
+
+    public static ChannelId FromGroupAndName(GroupId groupId, string rawName)
+    {
+        string normalized = NormalizeName(rawName);
+        byte[] input = System.Text.Encoding.UTF8.GetBytes($"{groupId.Value}:#{normalized}");
+        return new ChannelId(Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(input)));
+    }
+
+    public static ChannelId DefaultGeneralFor(GroupId groupId)
+        => FromGroupAndName(groupId, DefaultGeneralName);
+
+    public byte[] ToBytes() => Convert.FromHexString(Value);
+
+    public override string ToString() => Value;
+}
+
+public sealed class ChannelIdJsonConverter : JsonConverter<ChannelId>
+{
+    public override ChannelId Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        => new(reader.GetString() ?? string.Empty);
+
+    public override void Write(Utf8JsonWriter writer, ChannelId value, JsonSerializerOptions options)
+        => writer.WriteStringValue(value.Value);
+
+    public override ChannelId ReadAsPropertyName(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        => new(reader.GetString() ?? string.Empty);
+
+    public override void WriteAsPropertyName(Utf8JsonWriter writer, ChannelId value, JsonSerializerOptions options)
+        => writer.WritePropertyName(value.Value);
+}
+
+/// <summary>
+/// Canal de discussion nommé appartenant à un groupe gouverné (ex: <c>#general</c> par défaut).
+/// </summary>
+public sealed record GroupChannel(
+    ChannelId ChannelId,
+    string Name,
+    DateTimeOffset CreatedAtUtc)
+{
+    public string DisplayName => $"#{Name}";
+}
+
+/// <summary>
 /// Rôle du nœud dans le réseau P2P (pair standard ou Point de Meeting 24/24 sur Raspberry Pi).
 /// </summary>
 public enum NodeRole

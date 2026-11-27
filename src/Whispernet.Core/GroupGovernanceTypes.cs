@@ -41,8 +41,41 @@ public sealed record GroupManifest(
     DateTimeOffset IssuedAtUtc,
     string OwnerSignatureBase64,
     ulong CheckpointLamportClock = 0,
-    IReadOnlyDictionary<AuthorId, MemberStatus>? CheckpointMemberStates = null)
+    IReadOnlyDictionary<AuthorId, MemberStatus>? CheckpointMemberStates = null,
+    IReadOnlyList<GroupChannel>? Channels = null)
 {
+    /// <summary>
+    /// Retourne la liste effective des canaux du groupe (contenant au minimum <c>#general</c> par défaut).
+    /// </summary>
+    public IReadOnlyList<GroupChannel> GetEffectiveChannels()
+    {
+        if (Channels is { Count: > 0 })
+        {
+            return Channels;
+        }
+
+        return new[]
+        {
+            new GroupChannel(ChannelId.DefaultGeneralFor(GroupId), ChannelId.DefaultGeneralName, IssuedAtUtc)
+        };
+    }
+
+    public bool HasChannel(ChannelId channelId)
+        => GetEffectiveChannels().Any(c => c.ChannelId == channelId);
+
+    public GroupChannel? FindChannel(string nameOrId)
+    {
+        if (string.IsNullOrWhiteSpace(nameOrId))
+        {
+            return null;
+        }
+
+        string trimmed = nameOrId.Trim().TrimStart('#').Trim();
+        IReadOnlyList<GroupChannel> list = GetEffectiveChannels();
+        return list.FirstOrDefault(c =>
+            c.Name.Equals(trimmed, StringComparison.OrdinalIgnoreCase) ||
+            c.ChannelId.Value.StartsWith(trimmed, StringComparison.OrdinalIgnoreCase));
+    }
     /// <summary>
     /// Construit la représentation binaire canonique signée par la clé privée du groupe.
     /// </summary>
@@ -87,6 +120,17 @@ public sealed record GroupManifest(
             {
                 WriteLengthPrefixedString(bw, mId.Value);
                 bw.Write((int)st);
+            }
+        }
+
+        if (Channels is not null)
+        {
+            bw.Write(Channels.Count);
+            foreach (GroupChannel ch in Channels)
+            {
+                WriteLengthPrefixedString(bw, ch.ChannelId.Value);
+                WriteLengthPrefixedString(bw, ch.Name);
+                bw.Write(ch.CreatedAtUtc.UtcTicks);
             }
         }
 

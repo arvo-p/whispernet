@@ -169,7 +169,8 @@ La solution \texttt{Whispernet.slnx} est découpée en projets C\# distincts (\e
 \texttt{src/Whispernet.Transport.Iroh} & Library (\texttt{net10.0}) & Adaptateur réseau Iroh QUIC (\texttt{N0.IrohNet}). Exécute les \texttt{OutAction} de \texttt{Core} et gère les timers. \\
 \texttt{src/Whispernet.App.Messaging} & Library (\texttt{net10.0}) & Logique applicative partagée et \emph{ViewModels} (salons, historique, commandes), indépendante de l'UI. \\
 \texttt{src/Whispernet.Client.Wpf} & WinExe (\texttt{net10.0-windows}) & Interface graphique \textbf{WPF} pour Windows (100\,\% visuelle, liée à \texttt{Whispernet.App.Messaging}). \\
-\texttt{src/Whispernet.Client.Linux} & Exe (\texttt{net10.0}) & Interface utilisateur pour Linux (100\,\% visuelle, liée à \texttt{Whispernet.App.Messaging}). \\
+\texttt{src/Whispernet.Client.Linux.Cli} & Exe (\texttt{net10.0}) & Interface terminal (CLI / TUI ncurses) pour Linux (liée à \texttt{Whispernet.App.Messaging}). \\
+\texttt{src/Whispernet.Client.Linux.Gui} & Exe (\texttt{net10.0}) & Interface graphique \textbf{MewUI} pour Linux (100\,\% visuelle, liée à \texttt{Whispernet.App.Messaging}). \\
 \texttt{src/Whispernet.MeetingNode} & Exe (\texttt{net10.0}) & Binaire terminal léger 24h/24 pour \textbf{Raspberry Pi / Linux} (utilise \texttt{Core} + \texttt{Transport.Iroh}). \\
 \texttt{Tests/} & Exe (\texttt{net10.0}) & Prototype fonctionnel de test de messagerie de groupe P2P (\texttt{demo}, \texttt{host}, \texttt{join}). \\
 \texttt{Rapports/} & Documentation & Rapports d'architecture et présent \emph{Plan d'implémentation 1.0}. \\
@@ -280,7 +281,7 @@ Dès qu'une fonctionnalité compile et fonctionne correctement, suivez ces 4 ét
 \begin{enumerate}
     \item \textbf{Vérifier que tout est vert localement} : lancez la compilation et la suite complète de tests avant de pousser :
 \begin{lstlisting}
-dotnet build src/Whispernet.Client.Linux/Whispernet.Client.Linux.csproj
+dotnet build src/Whispernet.Client.Linux.Cli/Whispernet.Client.Linux.Cli.csproj
 dotnet run --project Tests/Whispernet.csproj -- test-all
 \end{lstlisting}
     \item \textbf{Synchroniser et pousser sa branche} :

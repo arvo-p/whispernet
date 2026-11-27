@@ -49,7 +49,8 @@ La solution suit une architecture en couches séparant strictement le protocole 
 - [`src/Whispernet.Transport.Iroh/`](src/Whispernet.Transport.Iroh/) — Adaptateur réseau Iroh QUIC (`N0.IrohNet`) qui exécute les actions de `Core` et gère les timers.
 - [`src/Whispernet.App.Messaging/`](src/Whispernet.App.Messaging/) — Logique applicative partagée et *ViewModels* (indépendante de l'UI).
 - [`src/Whispernet.Client.Wpf/`](src/Whispernet.Client.Wpf/) — Interface graphique **WPF** pour Windows (100 % UI, liée à `Whispernet.App.Messaging`).
-- [`src/Whispernet.Client.Linux/`](src/Whispernet.Client.Linux/) — Interface utilisateur pour Linux (100 % UI, liée à `Whispernet.App.Messaging`).
+- [`src/Whispernet.Client.Linux.Cli/`](src/Whispernet.Client.Linux.Cli/) — Interface terminal (CLI / ncurses TUI) pour Linux (100 % UI, liée à `Whispernet.App.Messaging`).
+- [`src/Whispernet.Client.Linux.Gui/`](src/Whispernet.Client.Linux.Gui/) — Interface graphique **MewUI** pour Linux (100 % UI, liée à `Whispernet.App.Messaging`).
 - [`src/Whispernet.MeetingNode/`](src/Whispernet.MeetingNode/) — Binaire console léger 24h/24 pour **Raspberry Pi / Linux** (`Core` + `Transport.Iroh`).
 - [`Rapports/`](Rapports/) — Documentation d'architecture et plan d'implémentation ([`Plan_d_implementation_1.0.tex`](Rapports/Plan_d_implementation_1.0.tex)).
 - [`Tests/`](Tests/) — Prototype de test de messagerie de groupe P2P avec `N0.IrohNet` ([`Tests/README.md`](Tests/README.md)).

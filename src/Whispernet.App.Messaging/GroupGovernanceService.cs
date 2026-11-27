@@ -89,6 +89,12 @@ public sealed class GroupGovernanceService
                 [ownerSession.Profile.AuthorId] = ownerSession.Profile.PublicKeySpkiBase64
             };
 
+            DateTimeOffset nowUtc = DateTimeOffset.UtcNow;
+            var defaultChannels = new List<GroupChannel>
+            {
+                new(ChannelId.DefaultGeneralFor(groupId), ChannelId.DefaultGeneralName, nowUtc)
+            };
+
             var unsignedManifest = new GroupManifest(
                 GroupId: groupId,
                 OwnerPublicKeySpkiBase64: Convert.ToBase64String(groupPubKeySpki),
@@ -100,8 +106,9 @@ public sealed class GroupGovernanceService
                 EphemeralMessageTtl: ephemeralMessageTtl,
                 IsTerminated: false,
                 ModeratorPublicKeysSpkiBase64: initialModerators,
-                IssuedAtUtc: DateTimeOffset.UtcNow,
-                OwnerSignatureBase64: string.Empty);
+                IssuedAtUtc: nowUtc,
+                OwnerSignatureBase64: string.Empty,
+                Channels: defaultChannels);
 
             byte[] manifestSig = groupAuthorityKey.SignData(unsignedManifest.BuildSignableBytes(), HashAlgorithmName.SHA256);
             GroupManifest signedManifest = unsignedManifest with
@@ -159,6 +166,7 @@ public sealed class GroupGovernanceService
         bool? terminateGroup = null,
         string? newJoinPassword = null,
         bool clearJoinPassword = false,
+        IReadOnlyList<GroupChannel>? newChannels = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(ownerSession);
@@ -206,6 +214,7 @@ public sealed class GroupGovernanceService
                 IsPasswordProtected = isProtected,
                 JoinPasswordSaltBase64 = saltB64,
                 JoinPasswordVerifierBase64 = verifierB64,
+                Channels = newChannels ?? cur.Channels,
                 IssuedAtUtc = DateTimeOffset.UtcNow,
                 OwnerSignatureBase64 = string.Empty
             };
@@ -233,6 +242,75 @@ public sealed class GroupGovernanceService
         GroupGovernanceState state,
         CancellationToken cancellationToken = default)
         => UpdateGroupManifestAsync(ownerSession, state, terminateGroup: true, cancellationToken: cancellationToken);
+
+    /// <summary>
+    /// Crée un nouveau canal (<c>#name</c> + identifiant hash SHA-256) signé par l'administrateur du groupe.
+    /// </summary>
+    public async Task<GroupChannel> CreateChannelAsync(
+        AccountSession ownerSession,
+        GroupGovernanceState state,
+        string rawChannelName,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(ownerSession);
+        ArgumentNullException.ThrowIfNull(state);
+
+        string normalized = ChannelId.NormalizeName(rawChannelName);
+        ChannelId channelId = ChannelId.FromGroupAndName(state.GroupId, normalized);
+        List<GroupChannel> channels = state.CurrentManifest.GetEffectiveChannels().ToList();
+        if (channels.Any(c => c.ChannelId == channelId || c.Name.Equals(normalized, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException($"Channel '#{normalized}' already exists in this group.");
+        }
+
+        var created = new GroupChannel(channelId, normalized, DateTimeOffset.UtcNow);
+        channels.Add(created);
+        await UpdateGroupManifestAsync(ownerSession, state, newChannels: channels, cancellationToken: cancellationToken).ConfigureAwait(false);
+        return created;
+    }
+
+    /// <summary>
+    /// Supprime un canal existant (par <c>#name</c> ou préfixe de <see cref="ChannelId"/>) signé par l'administrateur du groupe.
+    /// Garantit qu'au moins un canal reste présent dans le groupe.
+    /// </summary>
+    public async Task<GroupChannel> RemoveChannelAsync(
+        AccountSession ownerSession,
+        GroupGovernanceState state,
+        string channelNameOrId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(ownerSession);
+        ArgumentNullException.ThrowIfNull(state);
+
+        GroupChannel? target = state.CurrentManifest.FindChannel(channelNameOrId)
+            ?? throw new KeyNotFoundException($"No channel matching '{channelNameOrId}' found in group.");
+
+        List<GroupChannel> channels = state.CurrentManifest.GetEffectiveChannels().ToList();
+        if (channels.Count <= 1)
+        {
+            throw new InvalidOperationException("Cannot remove the last remaining channel of a group.");
+        }
+
+        channels.RemoveAll(c => c.ChannelId == target.ChannelId);
+        await UpdateGroupManifestAsync(ownerSession, state, newChannels: channels, cancellationToken: cancellationToken).ConfigureAwait(false);
+        return target;
+    }
+
+    public async Task<bool> IsGroupOwnerAsync(
+        AccountSession session,
+        GroupId groupId,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            PersistedGroupVaultEntry entry = await LoadVaultEntryAsync(session, groupId, cancellationToken).ConfigureAwait(false);
+            return !string.IsNullOrWhiteSpace(entry.OwnerPrivateKeyPkcs8Base64);
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     /// <summary>
     /// Signe une action d'admission ou de modération avec la session du modérateur ou créateur.

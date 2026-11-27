@@ -144,7 +144,7 @@ Lorsqu'un utilisateur définit un mot de passe optionnel à la création du comp
 
 \section{Audit des vérifications d'intégrité et de propriété}
 
-Un audit complet de la chaîne de validation (couches \texttt{Whispernet.Core}, \texttt{Whispernet.App.Messaging} et \texttt{Whispernet.Client.Linux}) garantit que chaque structure reçue du réseau ou rechargée depuis le disque fait l'objet d'une vérification cryptographique systématique de son \textbf{intégrité} et de sa \textbf{propriété} (\emph{ownership}) à l'ingestion initiale, lors des mises à jour et lors du rejeu causal.
+Un audit complet de la chaîne de validation (couches \texttt{Whispernet.Core}, \texttt{Whispernet.App.Messaging}, \texttt{Whispernet.Client.Linux.Cli} et \texttt{Whispernet.Client.Linux.Gui}) garantit que chaque structure reçue du réseau ou rechargée depuis le disque fait l'objet d'une vérification cryptographique systématique de son \textbf{intégrité} et de sa \textbf{propriété} (\emph{ownership}) à l'ingestion initiale, lors des mises à jour et lors du rejeu causal.
 
 \subsection{1. Événements du DAG causal (\texttt{CausalDagEngine} \& \texttt{ChatEvent})}
 À chaque ingestion unitaire (\texttt{CausalDagEngine.TryIngestEvent}) ou par lot sur le flux \texttt{0x02} (\texttt{CausalDagEngine.TryIngestBatch}) :

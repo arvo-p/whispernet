@@ -39,14 +39,16 @@ public enum GroupWirePacketKind
 public sealed record ChatDagSyncRequest(
     GroupId GroupId,
     NodeId RequesterNodeId,
-    IReadOnlyList<string> KnownHeadIds);
+    IReadOnlyList<string> KnownHeadIds,
+    ChannelId? ChannelId = null);
 
 public sealed record ChatDagSyncBatch(
     GroupId GroupId,
     int BatchIndex,
     int TotalBatches,
     IReadOnlyList<ChatEvent> Events,
-    NodeId? SenderNodeId = null);
+    NodeId? SenderNodeId = null,
+    ChannelId? ChannelId = null);
 
 /// <summary>
 /// Enveloppe réseau multiplexée sur Iroh QUIC pour les messages de chat, demandes d'admission et synchro de groupe.
@@ -374,7 +376,8 @@ public sealed class GroupMeshService
             }
         }
 
-        var batch = new ChatDagSyncBatch(groupId, 0, 1, new[] { evt }, _transport.SelfId);
+        var evtChannelId = new ChannelId(evt.EffectiveChannelIdHex);
+        var batch = new ChatDagSyncBatch(groupId, 0, 1, new[] { evt }, _transport.SelfId, evtChannelId);
         var packet = new GroupWirePacket(
             GroupWirePacketKind.DagSyncBatch,
             DagSyncBatch: batch,
@@ -521,10 +524,12 @@ public sealed class GroupMeshService
         NodeId targetPeer,
         GroupId groupId,
         ChatRoomDagState localDag,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        ChannelId? channelId = null)
     {
         ArgumentNullException.ThrowIfNull(localDag);
-        var req = new ChatDagSyncRequest(groupId, _transport.SelfId, localDag.HeadIds.ToList());
+        ChannelId effectiveChannel = channelId ?? new ChannelId(localDag.RoomIdHex);
+        var req = new ChatDagSyncRequest(groupId, _transport.SelfId, localDag.HeadIds.ToList(), effectiveChannel);
         var packet = new GroupWirePacket(
             GroupWirePacketKind.DagSyncRequest,
             DagSyncRequest: req,
@@ -543,15 +548,17 @@ public sealed class GroupMeshService
         ChatRoomDagState localDag,
         IReadOnlyList<string> remoteHeadIds,
         int batchSize = CausalDagEngine.DefaultSyncBatchSize,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        ChannelId? channelId = null)
     {
         ArgumentNullException.ThrowIfNull(localDag);
+        ChannelId effectiveChannel = channelId ?? new ChannelId(localDag.RoomIdHex);
         IReadOnlyList<ChatEvent> slice = CausalDagEngine.ComputeMissingTopologicalSlice(localDag, remoteHeadIds);
         IReadOnlyList<IReadOnlyList<ChatEvent>> batches = CausalDagEngine.ChunkTopologicalSlice(slice, batchSize);
 
         for (int i = 0; i < batches.Count; i++)
         {
-            var batch = new ChatDagSyncBatch(groupId, i, batches.Count, batches[i], _transport.SelfId);
+            var batch = new ChatDagSyncBatch(groupId, i, batches.Count, batches[i], _transport.SelfId, effectiveChannel);
             var packet = new GroupWirePacket(
                 GroupWirePacketKind.DagSyncBatch,
                 DagSyncBatch: batch,

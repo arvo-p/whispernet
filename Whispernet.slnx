@@ -4,7 +4,8 @@
     <Project Path="src/Whispernet.Transport.Iroh/Whispernet.Transport.Iroh.csproj" />
     <Project Path="src/Whispernet.App.Messaging/Whispernet.App.Messaging.csproj" />
     <Project Path="src/Whispernet.MeetingNode/Whispernet.MeetingNode.csproj" />
-    <Project Path="src/Whispernet.Client.Linux/Whispernet.Client.Linux.csproj" />
+    <Project Path="src/Whispernet.Client.Linux.Cli/Whispernet.Client.Linux.Cli.csproj" />
+    <Project Path="src/Whispernet.Client.Linux.Gui/Whispernet.Client.Linux.Gui.csproj" />
     <Project Path="src/Whispernet.Client.Wpf/Whispernet.Client.Wpf.csproj" />
   </Folder>
   <Folder Name="/Tests/">

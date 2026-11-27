@@ -80,6 +80,48 @@ public static class GroupGovernanceEngine
             }
         }
 
+        IReadOnlyList<GroupChannel> effectiveChannels = manifest.GetEffectiveChannels();
+        if (effectiveChannels.Count == 0)
+        {
+            error = "GroupManifest must contain at least one channel.";
+            return false;
+        }
+
+        var seenChannelIds = new HashSet<ChannelId>();
+        var seenChannelNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (GroupChannel ch in effectiveChannels)
+        {
+            if (!ch.ChannelId.IsValid || string.IsNullOrWhiteSpace(ch.Name))
+            {
+                error = "Invalid ChannelId or empty channel name in GroupManifest.";
+                return false;
+            }
+
+            string normalizedName;
+            try
+            {
+                normalizedName = ChannelId.NormalizeName(ch.Name);
+            }
+            catch (ArgumentException ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+
+            ChannelId expectedId = ChannelId.FromGroupAndName(manifest.GroupId, normalizedName);
+            if (ch.ChannelId != expectedId)
+            {
+                error = $"Channel '{ch.Name}' hash ID ({ch.ChannelId}) does not match expected hash ({expectedId}).";
+                return false;
+            }
+
+            if (!seenChannelIds.Add(ch.ChannelId) || !seenChannelNames.Add(normalizedName))
+            {
+                error = $"Duplicate channel '{ch.Name}' in GroupManifest.";
+                return false;
+            }
+        }
+
         error = null;
         return true;
     }

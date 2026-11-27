@@ -14,19 +14,32 @@ public sealed record ChatEvent(
     ulong LogicalClock,
     ulong TimestampMs,
     byte[] Payload,
-    byte[] Signature) : ICausalEvent
+    byte[] Signature,
+    byte[]? ChannelId = null) : ICausalEvent
 {
     public const int HashSizeBytes = CausalDagEngine.HashSizeBytes;
     public const int MaxParents = CausalDagEngine.MaxParents;
 
     public string EventIdHex => Convert.ToHexStringLower(EventId);
     public string RoomIdHex => Convert.ToHexStringLower(RoomId);
-    byte[] ICausalEvent.ScopeId => RoomId;
+
+    /// <summary>
+    /// Identifiant de canal effectif (32 octets) : <see cref="ChannelId"/> s'il est renseigné,
+    /// sinon le hash du canal <c>#general</c> par défaut du groupe.
+    /// </summary>
+    public byte[] EffectiveChannelId =>
+        ChannelId is { Length: HashSizeBytes }
+            ? ChannelId
+            : Core.ChannelId.DefaultGeneralFor(new GroupId(RoomIdHex)).ToBytes();
+
+    public string EffectiveChannelIdHex => Convert.ToHexStringLower(EffectiveChannelId);
+
+    byte[] ICausalEvent.ScopeId => ChannelId is { Length: HashSizeBytes } ? ChannelId : RoomId;
 
     public AuthorId GetAuthorId() => new(Convert.ToHexStringLower(SHA256.HashData(AuthorPublicKey)));
 
     public byte[] BuildSignableBytes()
-        => BuildSignableBytes(EventId, RoomId, AuthorPublicKey, Parents, LogicalClock, TimestampMs, Payload);
+        => BuildSignableBytes(EventId, RoomId, AuthorPublicKey, Parents, LogicalClock, TimestampMs, Payload, ChannelId);
 
     /// <summary>
     /// Calcule l'identifiant unique event_id (32 octets SHA-256) à partir de la liste ordonnée des parents et du payload.
@@ -44,9 +57,11 @@ public sealed record ChatEvent(
         IReadOnlyList<byte[]> parents,
         ulong logicalClock,
         ulong timestampMs,
-        ReadOnlySpan<byte> payload)
+        ReadOnlySpan<byte> payload,
+        byte[]? channelId = null)
     {
-        int totalLen = HashSizeBytes + HashSizeBytes + 4 + authorPublicKey.Length
+        int channelLen = channelId is { Length: HashSizeBytes } ? HashSizeBytes : 0;
+        int totalLen = HashSizeBytes + HashSizeBytes + channelLen + 4 + authorPublicKey.Length
             + 4 + (parents.Count * HashSizeBytes) + 8 + 8 + 4 + payload.Length;
         byte[] buffer = new byte[totalLen];
         Span<byte> span = buffer;
@@ -57,6 +72,12 @@ public sealed record ChatEvent(
 
         roomId.CopyTo(span.Slice(offset, HashSizeBytes));
         offset += HashSizeBytes;
+
+        if (channelLen > 0)
+        {
+            channelId.AsSpan().CopyTo(span.Slice(offset, HashSizeBytes));
+            offset += HashSizeBytes;
+        }
 
         BinaryPrimitives.WriteInt32LittleEndian(span.Slice(offset, 4), authorPublicKey.Length);
         offset += 4;

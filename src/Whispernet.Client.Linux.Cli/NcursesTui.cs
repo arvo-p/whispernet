@@ -4,7 +4,7 @@ using Whispernet.App.Messaging;
 using Whispernet.Core;
 using Whispernet.Transport.Iroh;
 
-namespace Whispernet.Client.Linux;
+namespace Whispernet.Client.Linux.Cli;
 
 /// <summary>
 /// Catégories (thèmes) de journaux de transactions filtrables dans l'interface ncurses.
@@ -93,6 +93,8 @@ internal sealed class NcursesTui
 
     private string _activeGroupId = "general";
     private string _activeGroupTitle = "General Group";
+    private string _activeChannelId = string.Empty;
+    private string _activeChannelName = ChannelId.DefaultGeneralName;
     private string? _lastInviteLink;
     private string? _boundSecretKeyB32;
     private string _boundAlpn = "/whispernet/direct/1";
@@ -118,6 +120,8 @@ internal sealed class NcursesTui
 
     public GroupGovernanceService GovernanceService => _govService;
     public string ActiveGroupId => _activeGroupId;
+    public string ActiveChannelId => _activeChannelId;
+    public string ActiveChannelName => _activeChannelName;
     public string? LastInviteLink => _lastInviteLink;
     public NodeId? SelfNodeId => _transport?.SelfId;
 
@@ -167,10 +171,26 @@ internal sealed class NcursesTui
             _groupTitles[key] = govState.CurrentManifest.Title;
             _activeGroupId = key;
             _activeGroupTitle = govState.CurrentManifest.Title;
-            if (_roomDags.TryGetValue(key, out ChatRoomDagState? existingDag))
+
+            IReadOnlyList<GroupChannel> channels = govState.CurrentManifest.GetEffectiveChannels();
+            GroupChannel? activeCh = channels.FirstOrDefault(c => c.ChannelId.Value.Equals(_activeChannelId, StringComparison.Ordinal))
+                ?? channels[0];
+            _activeChannelId = activeCh.ChannelId.Value;
+            _activeChannelName = activeCh.Name;
+
+            if (_roomDags.TryGetValue(_activeChannelId, out ChatRoomDagState? chDag))
+            {
+                RebuildRoomMessagesLocked(key, _activeGroupTitle, chDag);
+            }
+            else if (_roomDags.TryGetValue(key, out ChatRoomDagState? existingDag))
             {
                 RebuildRoomMessagesLocked(key, _activeGroupTitle, existingDag);
             }
+            else
+            {
+                _messages.RemoveAll(m => m.GroupId.Equals(key, StringComparison.Ordinal));
+            }
+
             if (govState.KnownAuthorNodes.Count <= 1)
             {
                 fallbackPeers = _peers.Keys.ToList();
@@ -200,25 +220,32 @@ internal sealed class NcursesTui
             return;
         }
 
-        ChatRoomDagState localDag;
+        List<(ChannelId ChannelId, ChatRoomDagState Dag)> channelDags = new();
         lock (_stateLock)
         {
-            localDag = GetOrCreateRoomDagLocked(govState.GroupId.Value, Convert.FromHexString(govState.GroupId.Value));
+            foreach (GroupChannel ch in govState.CurrentManifest.GetEffectiveChannels())
+            {
+                ChatRoomDagState dag = GetOrCreateRoomDagLocked(ch.ChannelId.Value, ch.ChannelId.ToBytes());
+                channelDags.Add((ch.ChannelId, dag));
+            }
         }
 
         foreach (NodeId target in targets)
         {
-            _ = Task.Run(async () =>
+            foreach ((ChannelId chId, ChatRoomDagState localDag) in channelDags)
             {
-                try
+                _ = Task.Run(async () =>
                 {
-                    await mesh.SendDagSyncRequestAsync(target, govState.GroupId, localDag).ConfigureAwait(false);
-                }
-                catch
-                {
-                    // Pair hors-ligne ou pas encore joignable
-                }
-            });
+                    try
+                    {
+                        await mesh.SendDagSyncRequestAsync(target, govState.GroupId, localDag, channelId: chId).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        // Pair hors-ligne ou pas encore joignable
+                    }
+                });
+            }
         }
     }
 
@@ -230,25 +257,27 @@ internal sealed class NcursesTui
             AuthorId authorId = evt.GetAuthorId();
             _knownAuthorNames[authorId] = authorName;
 
-            if (!_roomDags.TryGetValue(groupId, out ChatRoomDagState? dag))
-            {
-                dag = new ChatRoomDagState(evt.RoomId);
-                _roomDags[groupId] = dag;
-            }
+            bool hasChannelScope = evt.ChannelId is { Length: ChatEvent.HashSizeBytes };
+            string dagKey = hasChannelScope ? evt.EffectiveChannelIdHex : groupId;
+            byte[] scopeBytes = hasChannelScope ? evt.ChannelId! : evt.RoomId;
 
+            ChatRoomDagState dag = GetOrCreateRoomDagLocked(dagKey, scopeBytes);
             if (!_chatEventService.TryIngestEvent(dag, evt, out string? error))
             {
                 AddLog(LogTheme.Chat, $"Rejected ChatEvent {evt.EventIdHex[..8]}: {error}");
                 return false;
             }
 
-            // Reconstruire les messages du groupe dans l'ordre exact de SortedHistory (parents -> logical_clock -> timestamp_ms)
-            RebuildRoomMessagesLocked(groupId, groupTitle, dag);
+            // Reconstruire les messages affichés si l'événement appartient au canal actif (ou DAG legacy du salon)
+            if (!hasChannelScope || string.IsNullOrEmpty(_activeChannelId) || dagKey.Equals(_activeChannelId, StringComparison.Ordinal))
+            {
+                RebuildRoomMessagesLocked(groupId, groupTitle, dag);
+            }
             _needsRedraw = true;
         }
 
         AddLog(LogTheme.Chat,
-            $"DAG Ingested event={evt.EventIdHex[..8]} clock={evt.LogicalClock} parents={evt.Parents.Count} by {authorName}");
+            $"DAG Ingested event={evt.EventIdHex[..8]} ch={ShortId(evt.EffectiveChannelIdHex)} clock={evt.LogicalClock} parents={evt.Parents.Count} by {authorName}");
         return true;
     }
 
@@ -447,7 +476,7 @@ internal sealed class NcursesTui
                 ? $" Moderator Queue [Pending: {pendingCount}] (A:Accept, I:Ignore, F2:Chat) "
                 : _showLogsPanel
                     ? $" Transaction Logs [Filter: {activeTheme.ToString().ToUpperInvariant()}] (F2:Chat, F3:Theme) "
-                    : $" Group Chat: {_activeGroupTitle} (#{ShortId(_activeGroupId)}) ";
+                    : $" Group Chat: {_activeGroupTitle} / #{_activeChannelName} ({ShortId(_activeChannelId)}) ";
             string rightTitle = " Peers (<15m) ";
 
             sb.Append("\x1b[36m┌");
@@ -493,7 +522,7 @@ internal sealed class NcursesTui
             sb.Append("\x1b[0m\n");
 
             // Ligne de saisie (commandes /... ou message direct)
-            string prompt = $"[{_activeGroupTitle}]> {_inputBuffer}█";
+            string prompt = $"[{_activeGroupTitle}#{_activeChannelName}]> {_inputBuffer}█";
             sb.Append("\x1b[97m");
             sb.Append(FitString(prompt, width));
             sb.Append("\x1b[0m");
@@ -860,15 +889,26 @@ internal sealed class NcursesTui
                     return Task.CompletedTask;
                 }
 
-                ChatRoomDagState dag = GetOrCreateRoomDagLocked(targetGroupId, Convert.FromHexString(targetGroupId));
+                string channelHex = _activeChannelId;
+                if (string.IsNullOrWhiteSpace(channelHex) || !(new ChannelId(channelHex).IsValid))
+                {
+                    channelHex = ChannelId.DefaultGeneralFor(activeGroup).Value;
+                    _activeChannelId = channelHex;
+                    _activeChannelName = ChannelId.DefaultGeneralName;
+                }
+
+                byte[] channelIdBytes = Convert.FromHexString(channelHex);
+                byte[] roomIdBytes = Convert.FromHexString(targetGroupId);
+                ChatRoomDagState dag = GetOrCreateRoomDagLocked(channelHex, channelIdBytes);
                 (IReadOnlyList<byte[]> parents, ulong nextClock) = CausalDagEngine.PrepareNextEventCausalContext(dag);
                 evt = _chatEventService.CreateSignedEvent(
                     _activeSession,
-                    dag.RoomId,
+                    roomIdBytes,
                     parents,
                     nextClock,
                     (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                    content);
+                    content,
+                    channelId: channelIdBytes);
             }
 
             if (!IngestDagEvent(targetGroupId, targetGroupTitle, evt, authorName))
@@ -997,6 +1037,10 @@ internal sealed class NcursesTui
 
             case "group":
                 await HandleGroupCommandAsync(tokens).ConfigureAwait(false);
+                break;
+
+            case "channel":
+                await HandleChannelCommandAsync(tokens).ConfigureAwait(false);
                 break;
 
             case "mod":
@@ -1473,11 +1517,147 @@ internal sealed class NcursesTui
             }
             AddLog(LogTheme.Group, $"Updated group '{_activeGroupId}' title to '{_activeGroupTitle}'.");
         }
+        else if (sub == "channel")
+        {
+            await HandleChannelCommandAsync(tokens.Skip(1).ToList());
+        }
         else
         {
             ShowCommandError(LogTheme.Group, $"Invalid /group syntax '{string.Join(' ', tokens)}'.",
-                "/group <create <title> [pwd] | use <id> [title] | title <title> | terminate>");
+                "/group <create <title> [pwd] | use <id> [title] | title <title> | channel <create|remove|use|list> ... | terminate>");
         }
+    }
+
+    private async Task HandleChannelCommandAsync(List<string> tokens)
+    {
+        if (tokens.Count < 2)
+        {
+            ShowCommandError(LogTheme.Group, "Missing /channel subcommand.",
+                "/channel <create <name> | remove <name|id> | use <name|id> | list>");
+            return;
+        }
+
+        string sub = tokens[1].ToLowerInvariant();
+        string gid;
+        GroupGovernanceState? govState;
+        lock (_stateLock)
+        {
+            gid = _activeGroupId;
+            _governedGroups.TryGetValue(gid, out govState);
+        }
+
+        if (govState is null)
+        {
+            AddLog(LogTheme.Group, $"Active group '{ShortId(gid)}' is not a governed group.");
+            return;
+        }
+
+        if (sub == "list")
+        {
+            IReadOnlyList<GroupChannel> channels = govState.CurrentManifest.GetEffectiveChannels();
+            AddLog(LogTheme.Group, $"Channels in '{govState.CurrentManifest.Title}' ({channels.Count}):");
+            foreach (GroupChannel ch in channels)
+            {
+                string marker = string.Equals(ch.ChannelId.Value, _activeChannelId, StringComparison.OrdinalIgnoreCase) ? " [ACTIVE]" : "";
+                AddLog(LogTheme.Group, $"  #{ch.Name}  id={ch.ChannelId.Value}{marker}");
+            }
+            return;
+        }
+
+        if (sub is "use" or "switch" && tokens.Count >= 3)
+        {
+            string query = tokens[2];
+            GroupChannel? target = govState.CurrentManifest.FindChannel(query);
+            if (target is null)
+            {
+                AddLog(LogTheme.Group, $"Channel '{query}' not found in '{govState.CurrentManifest.Title}'.");
+                return;
+            }
+
+            lock (_stateLock)
+            {
+                _activeChannelId = target.ChannelId.Value;
+                _activeChannelName = target.Name;
+                if (_roomDags.TryGetValue(_activeChannelId, out ChatRoomDagState? dag))
+                {
+                    RebuildRoomMessagesLocked(gid, govState.CurrentManifest.Title, dag);
+                }
+                else
+                {
+                    _messages.RemoveAll(m => m.GroupId.Equals(gid, StringComparison.Ordinal));
+                }
+                _needsRedraw = true;
+            }
+            AddLog(LogTheme.Group, $"Switched active channel to #{target.Name} ({ShortId(target.ChannelId.Value)}).");
+            TriggerBackgroundGroupSync(govState);
+            return;
+        }
+
+        if (sub is "create" or "add" && tokens.Count >= 3)
+        {
+            if (_activeSession is null)
+            {
+                AddLog(LogTheme.Auth, "Unlock the group administrator account first.");
+                return;
+            }
+
+            string rawName = tokens[2];
+            try
+            {
+                GroupChannel created = await _govService.CreateChannelAsync(_activeSession, govState, rawName).ConfigureAwait(false);
+                RegisterGovernedGroup(govState);
+                lock (_stateLock)
+                {
+                    _activeChannelId = created.ChannelId.Value;
+                    _activeChannelName = created.Name;
+                    _messages.RemoveAll(m => m.GroupId.Equals(gid, StringComparison.Ordinal));
+                    _needsRedraw = true;
+                }
+                AddLog(LogTheme.Group, $"Created channel #{created.Name} (id={created.ChannelId.Value}) in '{govState.CurrentManifest.Title}'.");
+                if (_directMesh is not null)
+                {
+                    _directMesh.RegisterGroup(govState);
+                    await _directMesh.BroadcastSyncPayloadAsync(govState.GroupId).ConfigureAwait(false);
+                    AddLog(LogTheme.Group, $"Broadcasted updated channel manifest v{govState.CurrentManifest.Version} to group peers.");
+                }
+            }
+            catch (Exception ex)
+            {
+                AddLog(LogTheme.Group, $"Failed to create channel: {ex.Message}");
+            }
+            return;
+        }
+
+        if (sub is "remove" or "delete" or "rm" && tokens.Count >= 3)
+        {
+            if (_activeSession is null)
+            {
+                AddLog(LogTheme.Auth, "Unlock the group administrator account first.");
+                return;
+            }
+
+            string query = tokens[2];
+            try
+            {
+                GroupChannel removed = await _govService.RemoveChannelAsync(_activeSession, govState, query).ConfigureAwait(false);
+                RegisterGovernedGroup(govState);
+                AddLog(LogTheme.Group, $"Removed channel #{removed.Name} (id={removed.ChannelId.Value}) from '{govState.CurrentManifest.Title}'.");
+                if (_directMesh is not null)
+                {
+                    _directMesh.RegisterGroup(govState);
+                    await _directMesh.BroadcastSyncPayloadAsync(govState.GroupId).ConfigureAwait(false);
+                    AddLog(LogTheme.Group, $"Broadcasted updated channel manifest v{govState.CurrentManifest.Version} to group peers.");
+                }
+            }
+            catch (Exception ex)
+            {
+                AddLog(LogTheme.Group, $"Failed to remove channel: {ex.Message}");
+            }
+            return;
+        }
+
+        ShowCommandError(LogTheme.Group, $"Invalid /channel syntax '{string.Join(' ', tokens)}'.",
+            "/channel <create <name> | remove <name|id> | use <name|id> | list>");
     }
 
     private async Task HandleModCommandAsync(List<string> tokens)
@@ -2149,12 +2329,15 @@ internal sealed class NcursesTui
                         if (sync.SenderNodeId is NodeId senderNode)
                         {
                             RecordPeerSeen(senderNode);
-                            ChatRoomDagState localDag;
-                            lock (_stateLock)
+                            foreach (GroupChannel ch in syncedState.CurrentManifest.GetEffectiveChannels())
                             {
-                                localDag = GetOrCreateRoomDagLocked(syncedState.GroupId.Value, Convert.FromHexString(syncedState.GroupId.Value));
+                                ChatRoomDagState localDag;
+                                lock (_stateLock)
+                                {
+                                    localDag = GetOrCreateRoomDagLocked(ch.ChannelId.Value, ch.ChannelId.ToBytes());
+                                }
+                                _ = _directMesh.SendDagSyncRequestAsync(senderNode, syncedState.GroupId, localDag, channelId: ch.ChannelId);
                             }
-                            _ = _directMesh.SendDagSyncRequestAsync(senderNode, syncedState.GroupId, localDag);
                         }
                         foreach (NodeId peerId in syncedState.GetRoomMemberEndpoints(_transport.SelfId))
                         {
@@ -2192,12 +2375,15 @@ internal sealed class NcursesTui
                 _directMesh.DagSyncRequestReceived += req =>
                 {
                     RecordPeerSeen(req.RequesterNodeId);
+                    string chKey = req.ChannelId is { IsValid: true } chId
+                        ? chId.Value
+                        : ChannelId.DefaultGeneralFor(req.GroupId).Value;
                     ChatRoomDagState localDag;
                     lock (_stateLock)
                     {
-                        localDag = GetOrCreateRoomDagLocked(req.GroupId.Value, Convert.FromHexString(req.GroupId.Value));
+                        localDag = GetOrCreateRoomDagLocked(chKey, Convert.FromHexString(chKey));
                     }
-                    _ = _directMesh.StreamTopologicalSliceAsync(req.RequesterNodeId, req.GroupId, localDag, req.KnownHeadIds);
+                    _ = _directMesh.StreamTopologicalSliceAsync(req.RequesterNodeId, req.GroupId, localDag, req.KnownHeadIds, channelId: new ChannelId(chKey));
                 };
                 _directMesh.DagSyncBatchReceived += batch =>
                 {
@@ -2211,6 +2397,11 @@ internal sealed class NcursesTui
                     }
 
                     string gid = batch.GroupId.Value;
+                    string batchChKey = batch.ChannelId is { IsValid: true } bCh
+                        ? bCh.Value
+                        : (batch.Events[0].ChannelId is { Length: 32 } eCh
+                            ? Convert.ToHexString(eCh).ToLowerInvariant()
+                            : ChannelId.DefaultGeneralFor(batch.GroupId).Value);
                     bool ok;
                     string? err = null;
                     List<ChatEvent> allowedEvents;
@@ -2221,6 +2412,12 @@ internal sealed class NcursesTui
                             if (govState.CurrentManifest.IsTerminated)
                             {
                                 AddLog(LogTheme.Chat, $"Ignored DagSyncBatch for terminated group #{ShortId(gid)}.");
+                                return;
+                            }
+
+                            if (!govState.CurrentManifest.HasChannel(new ChannelId(batchChKey)))
+                            {
+                                AddLog(LogTheme.Chat, $"Ignored DagSyncBatch for unknown/removed channel {ShortId(batchChKey)} in #{ShortId(gid)}.");
                                 return;
                             }
 
@@ -2239,9 +2436,9 @@ internal sealed class NcursesTui
                             allowedEvents = batch.Events.ToList();
                         }
 
-                        ChatRoomDagState dag = GetOrCreateRoomDagLocked(gid, Convert.FromHexString(gid));
+                        ChatRoomDagState dag = GetOrCreateRoomDagLocked(batchChKey, Convert.FromHexString(batchChKey));
                         ok = _chatEventService.TryIngestBatch(dag, allowedEvents, out err);
-                        if (ok)
+                        if (ok && (string.IsNullOrEmpty(_activeChannelId) || batchChKey.Equals(_activeChannelId, StringComparison.OrdinalIgnoreCase)))
                         {
                             string title = _groupTitles.TryGetValue(gid, out string? t) ? t : gid;
                             RebuildRoomMessagesLocked(gid, title, dag);
@@ -2255,7 +2452,7 @@ internal sealed class NcursesTui
                         {
                             _ = _chatHistoryRepo.UpsertBatchAsync(allowedEvents);
                         }
-                        AddLog(LogTheme.Chat, $"Synced {allowedEvents.Count} ChatEvent(s) for #{ShortId(gid)} (batch {batch.BatchIndex + 1}/{batch.TotalBatches}).");
+                        AddLog(LogTheme.Chat, $"Synced {allowedEvents.Count} ChatEvent(s) for #{ShortId(gid)}/{ShortId(batchChKey)} (batch {batch.BatchIndex + 1}/{batch.TotalBatches}).");
                     }
                     else
                     {
@@ -2387,7 +2584,7 @@ internal sealed class NcursesTui
 
             lock (_stateLock)
             {
-                foreach (var group in saved.GroupBy(static x => x.Event.RoomIdHex, StringComparer.Ordinal))
+                foreach (var group in saved.GroupBy(static x => x.Event.EffectiveChannelIdHex, StringComparer.Ordinal))
                 {
                     foreach ((ChatEvent evt, string authorName) in group)
                     {
@@ -2398,11 +2595,13 @@ internal sealed class NcursesTui
                     }
 
                     ChatEvent first = group.First().Event;
-                    ChatRoomDagState dag = GetOrCreateRoomDagLocked(group.Key, first.RoomId);
-                    if (_chatEventService.TryIngestBatch(dag, group.Select(static x => x.Event), out _))
+                    string roomIdHex = first.RoomIdHex;
+                    ChatRoomDagState dag = GetOrCreateRoomDagLocked(group.Key, first.EffectiveChannelId);
+                    if (_chatEventService.TryIngestBatch(dag, group.Select(static x => x.Event), out _) &&
+                        (string.IsNullOrEmpty(_activeChannelId) || group.Key.Equals(_activeChannelId, StringComparison.OrdinalIgnoreCase)))
                     {
-                        string title = _groupTitles.TryGetValue(group.Key, out string? t) ? t : group.Key;
-                        RebuildRoomMessagesLocked(group.Key, title, dag);
+                        string title = _groupTitles.TryGetValue(roomIdHex, out string? t) ? t : roomIdHex;
+                        RebuildRoomMessagesLocked(roomIdHex, title, dag);
                     }
                 }
                 _needsRedraw = true;

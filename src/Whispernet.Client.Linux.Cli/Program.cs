@@ -4,7 +4,7 @@ using Whispernet.App.Messaging;
 using Whispernet.Core;
 using Whispernet.Transport.Iroh;
 
-namespace Whispernet.Client.Linux;
+namespace Whispernet.Client.Linux.Cli;
 
 internal static class Program
 {
@@ -1040,6 +1040,60 @@ internal static class Program
             DumpLogs("Alice", tuiA);
             DumpLogs("Bob", tuiB);
             DumpLogs("Charlie", tuiC);
+            return 1;
+        }
+
+        // Verify default #general channel hash and admin channel creation / removal / per-channel DAG isolation
+        string expectedGeneralId = ChannelId.DefaultGeneralFor(new GroupId(groupId)).Value;
+        if (!string.Equals(tuiA.ActiveChannelId, expectedGeneralId, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(tuiA.ActiveChannelName, "general", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($"[Phase2] ERROR: Default channel mismatch (expected #general/{expectedGeneralId}, got #{tuiA.ActiveChannelName}/{tuiA.ActiveChannelId}).");
+            return 1;
+        }
+
+        await tuiA.ProcessInputLineAsync("/channel create announcements").ConfigureAwait(false);
+        string expectedAnnId = ChannelId.FromGroupAndName(new GroupId(groupId), "announcements").Value;
+        if (!string.Equals(tuiA.ActiveChannelId, expectedAnnId, StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($"[Phase2] ERROR: Alice failed to create or switch to #announcements (got {tuiA.ActiveChannelId}).");
+            return 1;
+        }
+
+        await tuiA.ProcessInputLineAsync("Announcement1 from Alice in #announcements").ConfigureAwait(false);
+
+        // Wait for Bob and Charlie to receive the updated v2 manifest containing #announcements
+        bool gotChannelSync = await WaitUntilAsync(
+            () => tuiB.GetRecentLogLines(20).Any(l => l.Contains("Synced group 'Voltaire'", StringComparison.Ordinal)) &&
+                  tuiC.GetRecentLogLines(20).Any(l => l.Contains("Synced group 'Voltaire'", StringComparison.Ordinal)),
+            timeoutMs: 15000).ConfigureAwait(false);
+        if (!gotChannelSync)
+        {
+            Console.WriteLine("[Phase2] ERROR: Bob or Charlie did not receive channel manifest sync.");
+            return 1;
+        }
+
+        await tuiB.ProcessInputLineAsync("/channel use announcements").ConfigureAwait(false);
+        await tuiC.ProcessInputLineAsync("/channel use announcements").ConfigureAwait(false);
+
+        bool annConverged = await WaitUntilAsync(
+            () => HasAllMessages(tuiA, groupId, ["Announcement1 from Alice in #announcements"]) &&
+                  HasAllMessages(tuiB, groupId, ["Announcement1 from Alice in #announcements"]) &&
+                  HasAllMessages(tuiC, groupId, ["Announcement1 from Alice in #announcements"]),
+            timeoutMs: 20000).ConfigureAwait(false);
+        Console.WriteLine($"[Phase2] All 3 peers synced #announcements channel message (id={expectedAnnId[..8]}..): {annConverged}");
+        if (!annConverged)
+        {
+            DumpLogs("Alice", tuiA);
+            DumpLogs("Bob", tuiB);
+            DumpLogs("Charlie", tuiC);
+            return 1;
+        }
+
+        await tuiA.ProcessInputLineAsync("/channel remove announcements").ConfigureAwait(false);
+        if (!string.Equals(tuiA.ActiveChannelId, expectedGeneralId, StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($"[Phase2] ERROR: Removing #announcements did not fall back to #general (got {tuiA.ActiveChannelName}).");
             return 1;
         }
 
