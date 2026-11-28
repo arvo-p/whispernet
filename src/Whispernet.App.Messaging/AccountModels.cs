@@ -40,6 +40,29 @@ public sealed class AccountSession : IDisposable{
         return _signingKey.SignData(data, HashAlgorithmName.SHA256);
     }
 
+    internal byte[] DerivePairSecret(ReadOnlySpan<byte> peerPublicKeySpki){
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ECParameters selfParams = _signingKey.ExportParameters(includePrivateParameters: true);
+        using var selfEcdh = ECDiffieHellman.Create(selfParams);
+        using var peerEcdh = ECDiffieHellman.Create();
+        peerEcdh.ImportSubjectPublicKeyInfo(peerPublicKeySpki, out _);
+
+        byte[] rawSecret = selfEcdh.DeriveRawSecretAgreement(peerEcdh.PublicKey);
+        try{
+            byte[] pairSecret = new byte[AccountCrypto.KeySizeBytes];
+            HKDF.DeriveKey(
+                HashAlgorithmName.SHA256,
+                rawSecret,
+                pairSecret,
+                ReadOnlySpan<byte>.Empty,
+                "whispernet-pair-secret-v1"u8);
+            return pairSecret;
+        }
+        finally{
+            CryptographicOperations.ZeroMemory(rawSecret);
+        }
+    }
+
     internal ReadOnlySpan<byte> GetFolderDek(){
         ObjectDisposedException.ThrowIf(_disposed, this);
         return _folderDek ?? throw new InvalidOperationException("This account does not use a folder encryption key.");
@@ -86,4 +109,6 @@ public interface IAccountService{
     byte[] SignData(AccountSession session, ReadOnlySpan<byte> data);
 
     bool VerifySignature(ReadOnlySpan<byte> publicKeySpki, ReadOnlySpan<byte> data, ReadOnlySpan<byte> signature);
+
+    byte[] DerivePairSecret(AccountSession session, ReadOnlySpan<byte> peerPublicKeySpki);
 }

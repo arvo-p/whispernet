@@ -13,6 +13,9 @@
     <ProjectReference Include="..\src\Whispernet.Core\Whispernet.Core.csproj" />
     <ProjectReference Include="..\src\Whispernet.Transport.Iroh\Whispernet.Transport.Iroh.csproj" />
     <ProjectReference Include="..\src\Whispernet.App.Messaging\Whispernet.App.Messaging.csproj" />
+    <ProjectReference Include="..\src\Whispernet.Daemon.Contracts\Whispernet.Daemon.Contracts.csproj" />
+    <ProjectReference Include="..\src\Whispernet.Daemon.Core\Whispernet.Daemon.Core.csproj" />
+    <ProjectReference Include="..\src\Whispernet.Daemon.Client\Whispernet.Daemon.Client.csproj" />
   </ItemGroup>
 
   <Target Name="OverrideIrohNativeWithMainlineDht" AfterTargets="Build">

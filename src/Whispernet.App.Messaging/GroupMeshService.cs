@@ -33,8 +33,23 @@ public enum GroupWirePacketKind
     RosterSync = 3,
     ModerationAction = 4,
     DagSyncRequest = 5,
-    DagSyncBatch = 6
+    DagSyncBatch = 6,
+    DirectMessage = 7,
+    DirectMessageAck = 8,
+    TypingIndicator = 9,
+    DtnBundle = 10,
+    DtnTagQuery = 11,
+    FriendRequest = 12,
+    FriendResponse = 13,
+    FriendRemove = 14,
+    OrganicAppPayload = 15
 }
+
+public sealed record OrganicAppPacket(
+    string AppId,
+    AuthorId SenderAuthorId,
+    string PayloadJson,
+    DateTimeOffset SentAtUtc);
 
 public sealed record ChatDagSyncRequest(
     GroupId GroupId,
@@ -62,7 +77,16 @@ public sealed record GroupWirePacket(
     ModerationAction? ModerationAction = null,
     ChatDagSyncRequest? DagSyncRequest = null,
     ChatDagSyncBatch? DagSyncBatch = null,
-    byte StreamId = 0x01);
+    byte StreamId = 0x01,
+    DirectMessageEnvelope? DirectMessage = null,
+    DirectMessageAck? DirectMessageAck = null,
+    TypingIndicatorPacket? TypingIndicator = null,
+    DtnBundle? DtnBundle = null,
+    DtnTagQuery? DtnTagQuery = null,
+    FriendRequestPacket? FriendRequest = null,
+    FriendResponsePacket? FriendResponse = null,
+    FriendRemovePacket? FriendRemove = null,
+    OrganicAppPacket? OrganicApp = null);
 
 /// <summary>
 /// Service unifié de messagerie de groupe avec topologie adaptative :
@@ -73,8 +97,11 @@ public sealed record GroupWirePacket(
 public sealed class GroupMeshService
 {
     public const byte DagSyncStreamId = 0x02;
+    public const byte DirectMessageStreamId = 0x03;
+    public const byte FriendStreamId = 0x04;
+    public const string FriendMeshConversationId = "__whispernet_organic_friends__";
 
-    private readonly IrohEndpointAdapter _transport;
+    private readonly IMeshTransport _transport;
     private readonly IPeerCacheRepository? _peerCache;
     private readonly ConcurrentDictionary<string, NodeState> _conversations = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, GroupGovernanceState> _groupGovernance = new(StringComparer.Ordinal);
@@ -85,8 +112,17 @@ public sealed class GroupMeshService
     public event Action<ModerationAction>? ModerationActionReceived;
     public event Action<ChatDagSyncRequest>? DagSyncRequestReceived;
     public event Action<ChatDagSyncBatch>? DagSyncBatchReceived;
+    public event Action<DirectMessageEnvelope>? DirectMessageReceived;
+    public event Action<DirectMessageAck>? DirectMessageAckReceived;
+    public event Action<TypingIndicatorPacket>? TypingIndicatorReceived;
+    public event Action<DtnBundle>? DtnBundleReceived;
+    public event Action<DtnTagQuery>? DtnTagQueryReceived;
+    public event Action<FriendRequestPacket>? FriendRequestReceived;
+    public event Action<FriendResponsePacket>? FriendResponseReceived;
+    public event Action<FriendRemovePacket>? FriendRemoveReceived;
+    public event Action<OrganicAppPacket>? OrganicAppPacketReceived;
 
-    public GroupMeshService(IrohEndpointAdapter transport, IPeerCacheRepository? peerCache = null)
+    public GroupMeshService(IMeshTransport transport, IPeerCacheRepository? peerCache = null)
     {
         _transport = transport ?? throw new ArgumentNullException(nameof(transport));
         _peerCache = peerCache;
@@ -263,6 +299,52 @@ public sealed class GroupMeshService
         RegisterGroup(govState, bootstrap);
         error = null;
         return true;
+    }
+
+    public void RegisterOrganicFriendMesh(IEnumerable<NodeId> friendNodes)
+    {
+        RegisterConversation(FriendMeshConversationId, friendNodes);
+    }
+
+    public async Task<int> BroadcastOrganicAppPayloadAsync(
+        string appId,
+        AuthorId senderAuthorId,
+        string payloadJson,
+        CancellationToken ct = default)
+    {
+        if (!_conversations.TryGetValue(FriendMeshConversationId, out NodeState? nodeState))
+        {
+            return 0;
+        }
+
+        List<NodeId> targets = nodeState.HyParView.ActiveView
+            .Where(id => id != _transport.SelfId)
+            .Distinct()
+            .ToList();
+        if (targets.Count == 0)
+        {
+            return 0;
+        }
+
+        var packet = new GroupWirePacket(
+            GroupWirePacketKind.OrganicAppPayload,
+            StreamId: FriendStreamId,
+            OrganicApp: new OrganicAppPacket(appId, senderAuthorId, payloadJson, DateTimeOffset.UtcNow));
+        byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(packet);
+        int delivered = 0;
+        foreach (NodeId target in targets)
+        {
+            try
+            {
+                await _transport.SendUniAsync(target, bytes, ct: ct).ConfigureAwait(false);
+                delivered++;
+            }
+            catch
+            {
+                // Ignore unreachable organic mesh peer
+            }
+        }
+        return delivered;
     }
 
     /// <summary>
@@ -570,6 +652,13 @@ public sealed class GroupMeshService
         return batches.Count;
     }
 
+    public async Task SendDirectPacketAsync(NodeId targetPeer, GroupWirePacket packet, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(packet);
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(packet);
+        await _transport.SendUniAsync(targetPeer, payload, allowDhtLookup: true, ct: ct).ConfigureAwait(false);
+    }
+
     /// <summary>
     /// Traite un payload entrant reçu par la couche transport pour cette messagerie de groupe.
     /// </summary>
@@ -620,6 +709,42 @@ public sealed class GroupMeshService
                         RegisterGroup(batchGov, new[] { batchSender });
                     }
                     DagSyncBatchReceived?.Invoke(packet.DagSyncBatch);
+                    return;
+
+                case GroupWirePacketKind.DirectMessage when packet.DirectMessage is not null:
+                    DirectMessageReceived?.Invoke(packet.DirectMessage);
+                    return;
+
+                case GroupWirePacketKind.DirectMessageAck when packet.DirectMessageAck is not null:
+                    DirectMessageAckReceived?.Invoke(packet.DirectMessageAck);
+                    return;
+
+                case GroupWirePacketKind.TypingIndicator when packet.TypingIndicator is not null:
+                    TypingIndicatorReceived?.Invoke(packet.TypingIndicator);
+                    return;
+
+                case GroupWirePacketKind.DtnBundle when packet.DtnBundle is not null:
+                    DtnBundleReceived?.Invoke(packet.DtnBundle);
+                    return;
+
+                case GroupWirePacketKind.DtnTagQuery when packet.DtnTagQuery is not null:
+                    DtnTagQueryReceived?.Invoke(packet.DtnTagQuery);
+                    return;
+
+                case GroupWirePacketKind.FriendRequest when packet.FriendRequest is not null:
+                    FriendRequestReceived?.Invoke(packet.FriendRequest);
+                    return;
+
+                case GroupWirePacketKind.FriendResponse when packet.FriendResponse is not null:
+                    FriendResponseReceived?.Invoke(packet.FriendResponse);
+                    return;
+
+                case GroupWirePacketKind.FriendRemove when packet.FriendRemove is not null:
+                    FriendRemoveReceived?.Invoke(packet.FriendRemove);
+                    return;
+
+                case GroupWirePacketKind.OrganicAppPayload when packet.OrganicApp is not null:
+                    OrganicAppPacketReceived?.Invoke(packet.OrganicApp);
                     return;
             }
         }

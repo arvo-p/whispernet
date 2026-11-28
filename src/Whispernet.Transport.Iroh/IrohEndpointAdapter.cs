@@ -11,7 +11,7 @@ namespace Whispernet.Transport.Iroh;
 /// Gère un pool de connexions QUIC persistantes et la connexion intelligente (<c>ConnectSmartAsync</c>) :
 /// essai rapide via ticket en cache, puis résolution automatique par <see cref="NodeId"/> seul via Mainline DHT.
 /// </summary>
-public sealed class IrohEndpointAdapter : IDisposable
+public sealed class IrohEndpointAdapter : IMeshTransport, IDisposable
 {
     private readonly IntPtr _endpointPtr;
     private readonly string _alpn;
@@ -137,6 +137,9 @@ public sealed class IrohEndpointAdapter : IDisposable
     /// 3. En cas d'échec ou d'absence de ticket (et si <paramref name="allowDhtLookup"/> est vrai),
     ///    résout l'adresse actuelle du pair à partir de son <see cref="NodeId"/> seul via Mainline DHT / Pkarr / mDNS.
     /// </summary>
+    public bool HasActiveConnection(NodeId target)
+        => !_disposed && _connections.ContainsKey(target);
+
     public Task<bool> ConnectSmartAsync( NodeId target, string? cachedTicket = null, bool allowDhtLookup = true, CancellationToken ct = default){
         ObjectDisposedException.ThrowIf(_disposed, this);
 

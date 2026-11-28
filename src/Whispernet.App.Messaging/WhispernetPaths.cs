@@ -73,4 +73,19 @@ public static class WhispernetPaths
         string root = string.IsNullOrWhiteSpace(rootDirectory) ? GetDataDirectory() : Path.GetFullPath(rootDirectory);
         return Path.Combine(root, "chat_history.db");
     }
+
+    /// <summary>
+    /// Retourne le chemin par défaut de la base SQLite des messages 1-on-1, profils horaires et bundles DTN
+    /// (isolée par compte lorsque <paramref name="accountId"/> est fourni).
+    /// </summary>
+    public static string GetDirectMessagesDbPath(string? rootDirectory = null, AuthorId? accountId = null)
+    {
+        if (accountId is AuthorId aid && aid.IsValid)
+        {
+            return Path.Combine(GetAccountDirectory(aid, rootDirectory), "direct_messages.db");
+        }
+
+        string root = string.IsNullOrWhiteSpace(rootDirectory) ? GetDataDirectory() : Path.GetFullPath(rootDirectory);
+        return Path.Combine(root, "direct_messages.db");
+    }
 }

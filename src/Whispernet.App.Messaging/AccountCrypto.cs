@@ -85,6 +85,25 @@ internal static class AccountCrypto
         }
     }
 
+    public static string ComputeBlindRoutingTagHex(ReadOnlySpan<byte> pairSecret, long epoch){
+        Span<byte> epochBytes = stackalloc byte[8];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt64BigEndian(epochBytes, epoch);
+        Span<byte> mac = stackalloc byte[32];
+        HMACSHA256.HashData(pairSecret, epochBytes, mac);
+        return Convert.ToHexStringLower(mac);
+    }
+
+    public static byte[] DeriveDirectMessageKey(ReadOnlySpan<byte> pairSecret){
+        byte[] key = new byte[KeySizeBytes];
+        HKDF.DeriveKey(
+            HashAlgorithmName.SHA256,
+            pairSecret,
+            key,
+            ReadOnlySpan<byte>.Empty,
+            "whispernet-dm-aes256gcm-v1"u8);
+        return key;
+    }
+
     /// <summary>
     /// Applique des permissions restrictives sur Linux/macOS (0700 dossier, 0600 fichier).
     /// </summary>

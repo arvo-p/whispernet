@@ -838,6 +838,16 @@ public sealed class GroupGovernanceService
             ?? throw new InvalidDataException($"Corrupted group vault file for {groupId}.");
     }
 
+    public void RemoveGroupFromVault(AccountSession session, GroupId groupId)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        string fullPath = Path.Combine(session.AccountDirectory, "vault", "groups", $"{groupId.Value}.json");
+        if (File.Exists(fullPath))
+        {
+            File.Delete(fullPath);
+        }
+    }
+
     private static string GetGroupVaultRelativePath(GroupId groupId) => $"groups/{groupId.Value}.json";
 
     private static byte[] DerivePasswordVerifier(string password, ReadOnlySpan<byte> salt)

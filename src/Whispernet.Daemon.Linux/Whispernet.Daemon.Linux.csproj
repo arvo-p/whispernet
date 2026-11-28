@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>whispernetd</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Whispernet.Daemon.Core\Whispernet.Daemon.Core.csproj" />
+    <ProjectReference Include="..\Whispernet.App.Messaging\Whispernet.App.Messaging.csproj" />
+    <ProjectReference Include="..\Whispernet.Daemon.Contracts\Whispernet.Daemon.Contracts.csproj" />
+  </ItemGroup>
+
+</Project>

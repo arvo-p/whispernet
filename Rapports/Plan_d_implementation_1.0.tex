@@ -165,15 +165,21 @@ La solution \texttt{Whispernet.slnx} est découpée en projets C\# distincts (\e
 \toprule
 \textbf{Projet / Dossier} & \textbf{Type / Cible} & \textbf{Rôle et responsabilités} \\
 \midrule
-\texttt{src/Whispernet.Core} & Library (\texttt{net10.0}) & Couche protocole pure \textbf{Sans-I/O} (HyParView + Plumtree). Zéro dépendance réseau ou UI. \\
-\texttt{src/Whispernet.Transport.Iroh} & Library (\texttt{net10.0}) & Adaptateur réseau Iroh QUIC (\texttt{N0.IrohNet}). Exécute les \texttt{OutAction} de \texttt{Core} et gère les timers. \\
-\texttt{src/Whispernet.App.Messaging} & Library (\texttt{net10.0}) & Logique applicative partagée et \emph{ViewModels} (salons, historique, commandes), indépendante de l'UI. \\
-\texttt{src/Whispernet.Client.Wpf} & WinExe (\texttt{net10.0-windows}) & Interface graphique \textbf{WPF} pour Windows (100\,\% visuelle, liée à \texttt{Whispernet.App.Messaging}). \\
-\texttt{src/Whispernet.Client.Linux.Cli} & Exe (\texttt{net10.0}) & Interface terminal (CLI / TUI ncurses) pour Linux (liée à \texttt{Whispernet.App.Messaging}). \\
-\texttt{src/Whispernet.Client.Linux.Gui} & Exe (\texttt{net10.0}) & Interface graphique \textbf{MewUI} pour Linux (100\,\% visuelle, liée à \texttt{Whispernet.App.Messaging}). \\
+\texttt{src/Whispernet.Core} & Library (\texttt{net10.0}) & Couche protocole pure \textbf{Sans-I/O} (HyParView, Plumtree, PRoPHET, \texttt{PeerActivityTimetable}, \texttt{IMeshTransport}). \\
+\texttt{src/Whispernet.Transport.Iroh} & Library (\texttt{net10.0}) & Adaptateur réseau Iroh QUIC (\texttt{N0.IrohNet}) implémentant \texttt{IMeshTransport}. \\
+\texttt{src/Whispernet.App.Messaging} & Library (\texttt{net10.0}) & Logique applicative partagée (comptes ECDSA/ECDH, groupes CRDT, DAG causal, messagerie 1-on-1). \\
+\texttt{src/Whispernet.Daemon.Contracts} & Library (\texttt{net10.0}) & Contrats IPC partagés (\texttt{DaemonStatusDto}, tags aveugles, enveloppes D-Bus / Named Pipe). \\
+\texttt{src/Whispernet.Daemon.Core} & Library (\texttt{net10.0}) & Cœur du démon \texttt{whispernetd} (endpoint Iroh unique, relais DTN aveugle, serveurs D-Bus Linux et Named Pipe Windows). \\
+\texttt{src/Whispernet.Daemon.Client} & Library (\texttt{net10.0}) & Client IPC multiplateforme implémentant \texttt{IMeshTransport} (D-Bus sous Linux, Named Pipe sous Windows). \\
+\texttt{src/Whispernet.Daemon.Linux} & Exe (\texttt{net10.0}) & Hôte \texttt{systemd} Linux (\texttt{whispernetd}) exposant \texttt{org.whispernet.Daemon} sur D-Bus. \\
+\texttt{src/Whispernet.Daemon.Windows.Service} & Exe (\texttt{net10.0-windows}) & Service Windows Session 0 (\texttt{UseWindowsService}) exposant \texttt{\textbackslash\textbackslash.\textbackslash pipe\textbackslash whispernetd} avec ACL. \\
+\texttt{src/Whispernet.Daemon.Windows.Tray} & WinExe (\texttt{net10.0-windows}) & Compagnon bureau Windows (\texttt{NotifyIcon}) connecté au service via Named Pipe. \\
+\texttt{src/Whispernet.Client.Wpf} & WinExe (\texttt{net10.0-windows}) & Interface graphique \textbf{WPF} pour Windows (liée à \texttt{App.Messaging} + \texttt{Daemon.Client}). \\
+\texttt{src/Whispernet.Client.Linux.Cli} & Exe (\texttt{net10.0}) & Interface terminal (CLI / TUI ncurses) pour Linux (liée à \texttt{App.Messaging} + \texttt{Daemon.Client}). \\
+\texttt{src/Whispernet.Client.Linux.Gui} & Exe (\texttt{net10.0}) & Interface graphique \textbf{MewUI} pour Linux (liée à \texttt{App.Messaging} + \texttt{Daemon.Client}). \\
 \texttt{src/Whispernet.MeetingNode} & Exe (\texttt{net10.0}) & Binaire terminal léger 24h/24 pour \textbf{Raspberry Pi / Linux} (utilise \texttt{Core} + \texttt{Transport.Iroh}). \\
-\texttt{Tests/} & Exe (\texttt{net10.0}) & Prototype fonctionnel de test de messagerie de groupe P2P (\texttt{demo}, \texttt{host}, \texttt{join}). \\
-\texttt{Rapports/} & Documentation & Rapports d'architecture et présent \emph{Plan d'implémentation 1.0}. \\
+\texttt{Tests/} & Exe (\texttt{net10.0}) & Suite de tests unitaires et d'intégration Iroh QUIC/DHT (\texttt{test-all}). \\
+\texttt{Rapports/} & Documentation & Rapports d'architecture, audit de sécurité et \emph{Plan d'implémentation 1.0}. \\
 \bottomrule
 \end{tabular}
 \caption{Structure complète de la solution \texttt{Whispernet.slnx}}
@@ -183,33 +189,40 @@ La solution \texttt{Whispernet.slnx} est découpée en projets C\# distincts (\e
 \begin{tikzpicture}[
     node distance=0.8cm and 0.9cm,
     mod/.style={draw=PrimaryBlue, thick, rounded corners=4pt, fill=SoftBg, align=center, inner sep=7pt, font=\small},
-    ui/.style={mod, draw=AccentTeal, fill=AccentTeal!8, minimum width=3.7cm},
+    ui/.style={mod, draw=AccentTeal, fill=AccentTeal!8, minimum width=3.5cm},
     lib/.style={mod, minimum width=5.2cm},
-    ext/.style={mod, dashed, draw=WarmAmber, fill=WarmAmber!5, minimum width=5.2cm},
+    ext/.style={mod, dashed, draw=WarmAmber, fill=WarmAmber!5, minimum width=5.0cm},
     arr/.style={-{Stealth[length=2.5mm]}, thick, PrimaryBlue}
 ]
     % Couche Hôtes / UI
-    \node[ui] (wpf) {\textbf{Whispernet.Client.Wpf}\\\scriptsize UI Windows (WPF)};
-    \node[ui, right=0.6cm of wpf] (lin) {\textbf{Whispernet.Client.Linux}\\\scriptsize UI Linux};
-    \node[ui, right=0.6cm of lin, draw=PrimaryBlue, fill=PrimaryBlue!8] (meet) {\textbf{Whispernet.MeetingNode}\\\scriptsize CLI Raspberry Pi 24/24};
+    \node[ui] (wpf) {\textbf{Client.Wpf + Tray}\\\scriptsize UI Windows \& NotifyIcon};
+    \node[ui, right=0.5cm of wpf] (lin) {\textbf{Client.Linux (Gui/Cli)}\\\scriptsize UI MewUI \& TUI};
+    \node[ui, right=0.5cm of lin, draw=PrimaryBlue, fill=PrimaryBlue!8] (meet) {\textbf{MeetingNode}\\\scriptsize CLI Raspberry Pi 24/24};
 
-    % Couche App (sous les deux UI)
+    % Couche App
     \coordinate (midui) at ($(wpf.south)!0.5!(lin.south)$);
-    \node[lib, below=0.9cm of midui] (app) {\textbf{Whispernet.App.Messaging}\\\scriptsize Logique applicative \& ViewModels (sans UI)};
+    \node[lib, below=0.8cm of midui] (app) {\textbf{Whispernet.App.Messaging}\\\scriptsize Logique applicative, ECDSA/ECDH, DAG \& DM};
+
+    % Couche Démon & IPC
+    \node[lib, below=0.8cm of app, xshift=-3.1cm, fill=AccentTeal!6] (dcli) {\textbf{Whispernet.Daemon.Client}\\\scriptsize D-Bus (Linux) / Named Pipe (Win)};
+    \node[lib, below=0.8cm of app, xshift=3.1cm, fill=PrimaryBlue!6] (dcore) {\textbf{Daemon.Core + Hosts}\\\scriptsize \texttt{systemd} / Windows Service};
 
     % Couche Transport
-    \node[lib, below=0.9cm of app, xshift=1.8cm] (trans) {\textbf{Whispernet.Transport.Iroh}\\\scriptsize Adaptateur réseau Iroh QUIC \& Timers};
+    \node[lib, below=0.8cm of dcore] (trans) {\textbf{Whispernet.Transport.Iroh}\\\scriptsize Endpoint Iroh QUIC unique \& Timers};
 
-    % Couche Core & NuGet (bien séparés horizontalement)
-    \node[lib, minimum width=5.0cm, below=1.0cm of trans, xshift=-3.6cm, fill=PrimaryBlue!8] (core) {\textbf{Whispernet.Core}\\\scriptsize Protocole pur Sans-I/O (HyParView + Plumtree)};
-    \node[ext, minimum width=5.0cm, below=1.0cm of trans, xshift=3.6cm] (iroh) {\textbf{N0.IrohNet (NuGet)}\\\scriptsize Bibliothèque native Iroh (QUIC, Relais, NAT)};
+    % Couche Core & NuGet
+    \node[lib, minimum width=5.0cm, below=0.9cm of trans, xshift=-3.6cm, fill=PrimaryBlue!8] (core) {\textbf{Whispernet.Core}\\\scriptsize Protocole pur Sans-I/O + \texttt{IMeshTransport}};
+    \node[ext, minimum width=5.0cm, below=0.9cm of trans, xshift=3.6cm] (iroh) {\textbf{N0.IrohNet (NuGet)}\\\scriptsize Bibliothèque native Iroh (QUIC, Relais, NAT)};
 
     % Flèches de dépendance
     \draw[arr] (wpf.south) -- (app.north -| wpf.south);
     \draw[arr] (lin.south) -- (app.north -| lin.south);
-    \draw[arr] (app.south) -- (trans.north -| app.south);
+    \draw[arr] (app.south) -- (dcli.north);
+    \draw[arr, dashed] (dcli.east) -- node[above, font=\scriptsize] {IPC} (dcore.west);
+    \draw[arr] (dcore.south) -- (trans.north);
     \draw[arr] (meet.south) |- (trans.east);
     \draw[arr] (trans.south) -- (core.north);
+    \draw[arr] (dcli.south) |- (core.west);
     \draw[arr, dashed, WarmAmber] (trans.south) -- (iroh.north);
 \end{tikzpicture}
 \end{center}
@@ -655,6 +668,21 @@ Toute mutation de \texttt{active\_view} (ajout ou suppression) doit immédiateme
 \end{tabular}
 \caption{Timers et événements internes nécessaires à l'orchestration Sans-I/O}
 \end{table}
+
+\subsection{Messagerie directe 1-on-1, bascule PRoPHET DTN et relais aveugle}
+
+La messagerie privée 1-on-1 (\texttt{DirectMessagingService}) repose sur un chiffrement de bout en bout par accord de clé \textbf{ECDH P-256 + HKDF-SHA256} (\texttt{pair\_secret}) et exige un accusé de réception signé (\texttt{DirectMessageAck}) pour chaque message identifié par un \texttt{MessageUuid} unique :
+
+\begin{enumerate}
+    \item \textbf{Transport direct QUIC (stream \texttt{0x03})} : lorsque le destinataire est joignable via Iroh (\texttt{endpoint\_connect} avec \emph{hole-punching} natif en arrière-plan), l'enveloppe chiffrée et signée (\texttt{DirectMessageEnvelope}) ainsi que les indicateurs de frappe éphémères (\texttt{TypingIndicatorPacket}) circulent directement sur QUIC. Dès réception et vérification, le destinataire renvoie un \texttt{DirectMessageAck} signé qui fait passer l'état du message à \emph{Delivered}.
+    \item \textbf{Bascule automatique après 10\,s vers PRoPHET DTN} : si aucun \texttt{ACK} n'est reçu dans les \textbf{10 secondes} (ou si l'envoi direct échoue immédiatement), le client encapsule \emph{exactement le même \texttt{MessageUuid}} dans un bundle DTN chiffré (\texttt{DtnBundle}), ce qui permet au destinataire de dédupliquer de manière transparente (clé primaire \texttt{message\_uuid} en SQLite) si les deux chemins finissent par aboutir.
+    \item \textbf{Routage aveugle rotatif (\texttt{BlindTag})} : chaque \texttt{DtnBundle} est estampillé d'un tag de routage aveugle rotatif par époque :
+    \[
+        \text{BlindTag} = \text{HMAC-SHA256}(\text{pair\_secret},\; \text{epoch})
+    \]
+    Les nœuds relais (y compris le démon \texttt{whispernetd} non authentifié) stockent le bundle dans \texttt{dtn\_relay\_bundles} sans pouvoir ni déchiffrer le contenu ni identifier l'émetteur ou le destinataire. L'interface affiche alors l'indicateur \emph{Queued via relay}.
+    \item \textbf{Sélection des $\sim$3 meilleurs relais mutuels par emploi du temps et PRoPHET} : l'activité en ligne de chaque pair est profilée dans \texttt{PeerActivityTimetable} sur 24 créneaux horaires en distinguant les \textbf{jours ouvrés} (lundi--vendredi) et les \textbf{week-ends} (samedi--dimanche). Lors d'une bascule DTN, \texttt{ProphetRoutingEngine.SelectTopRelays} évalue \textbf{tous les pairs mutuels} partageant au moins un groupe gouverné avec l'émetteur et le destinataire, en combinant la similarité cosinus des heures de présence avec le destinataire ($60\,\%$) et la prédictibilité PRoPHET ($40\,\%$), puis remet le bundle aux \textbf{3 meilleurs candidats}.
+\end{enumerate}
 
 \subsection{Idées}
 \subsubsection{Raspberry PI : Point de Meeting 24/24}

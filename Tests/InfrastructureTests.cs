@@ -2,6 +2,8 @@ using System.Security.Cryptography;
 using System.Text;
 using Whispernet.App.Messaging;
 using Whispernet.Core;
+using Whispernet.Daemon.Contracts;
+using Whispernet.Daemon.Core;
 using Whispernet.Transport.Iroh;
 
 namespace Whispernet;
@@ -22,17 +24,23 @@ public static class InfrastructureTests
         RunTest("1.5 Topologie adaptative avec hystérésis (>16 Plumtree, <12 Full Mesh)", TestAdaptiveTopologyHysteresis);
         RunTest("1.6 GroupGovernanceEngine (Manifest + LWW-CRDT + Moderation + Tombstone)", TestGroupGovernancePhase1);
         RunTest("1.7 Governance DAG Replay + Demotion Rollback + Log Compaction", TestGovernanceDagReplayAndCompaction);
+        RunTest("1.8 PeerActivityTimetable (Weekday vs Weekend) + PRoPHET Top-3 Mutual Relays", TestPeerActivityTimetableAndProphetRelays);
+        RunTest("1.9 FriendGraphEngine (Request/Accept/Reject/Remove + Mutual + Security)", TestFriendGraphEngineProtocol);
 
         // Niveau 2 : Intégration SQLite réelle et Comptes chiffrés (.App)
         await RunTestAsync("2.1 SqlitePeerCacheRepository (CRUD + Ordre + Purge)", TestSqlitePeerCacheRepositoryAsync);
         await RunTestAsync("2.2 AccountService + WhispernetPaths (ECDSA + PBKDF2 + AES-GCM)", TestAccountServiceAsync);
         await RunTestAsync("2.3 GroupGovernanceService + GroupMeshService (Phase 2)", TestGroupGovernancePhase2Async);
+        await RunTestAsync("2.4 ECDH Pair Secret + Blind-Tag HMAC + UUID Deduplication", TestDirectMessageCryptoAndDedupAsync);
+        await RunTestAsync("2.5 FriendService (Vault Persistence + Friend Link + DM Policy)", TestFriendServiceVaultAndPolicyAsync);
 
         // Niveau 3 : Réseau réel Iroh QUIC + Mainline DHT (par NodeId seul)
         await RunTestAsync("3.1 Iroh QUIC + Discovery All (GroupMeshService 1-to-1)", TestRealIrohMainlineDhtDirectMessagingAsync);
         await RunTestAsync("3.2 Iroh QUIC + Mainline DHT SEULE (sans mDNS ni n0_dns)", TestRealIrohMainlineDhtIsolatedAsync);
         await RunTestAsync("3.3 Invite Link (Mods-Only + Pre-Approval) + Live Iroh Join/Sync", TestLiveInvitationLinkAndPreApprovalAsync);
         await RunTestAsync("3.4 ChatDAG Batched Topological Slice Sync (Stream 0x02, 500/batch)", TestLiveDagTopologicalSliceSyncAsync);
+        await RunTestAsync("3.5 1-on-1 Live QUIC ACK + Typing + PRoPHET Blind-Tagged Relay Fallback", TestLiveDirectMessagingAckAndDtnFallbackAsync);
+        await RunTestAsync("3.6 WhispernetDaemonHost Unattended Blind DTN Relay & Watch-Tag Claim", TestDaemonUnattendedBlindRelayAsync);
 
         Console.WriteLine("\nTOUS LES TESTS ONT RÉUSSI AVEC SUCCÈS !");
         return 0;
@@ -1036,7 +1044,7 @@ public static class InfrastructureTests
                 }
             };
 
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(45));
             aliceTransport.StartAcceptLoop(aliceMesh.HandleIncomingPayload, cts.Token);
             bobTransport.StartAcceptLoop(bobMesh.HandleIncomingPayload, cts.Token);
 
@@ -1056,5 +1064,462 @@ public static class InfrastructureTests
                 Directory.Delete(tempRoot, recursive: true);
             }
         }
+    }
+
+    private static void TestPeerActivityTimetableAndProphetRelays()
+    {
+        var selfId = new AuthorId(new string('a', 64));
+        var recipientId = new AuthorId(new string('b', 64));
+        var relay1 = new AuthorId(new string('1', 64)); // Matches recipient weekday 14h & weekend 20h
+        var relay2 = new AuthorId(new string('2', 64)); // Matches recipient weekday 14h
+        var relay3 = new AuthorId(new string('3', 64)); // Matches recipient weekend 20h
+        var relay4 = new AuthorId(new string('4', 64)); // Opposite hours (03h)
+
+        // Build a governed group with self, recipient, and 4 mutual peers
+        using var ecdsa = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        byte[] spki = ecdsa.ExportSubjectPublicKeyInfo();
+        string spkiB64 = Convert.ToBase64String(spki);
+        var groupId = GroupId.FromOwnerPublicKeySpki(spki);
+        var manifest = new GroupManifest(groupId, spkiB64, 1, "MutualGroup", false, null, null, null, false,
+            new Dictionary<AuthorId, string> { [selfId] = spkiB64 }, DateTimeOffset.UtcNow, "sig", 0, null,
+            new[] { new GroupChannel(ChannelId.DefaultGeneralFor(groupId), "general", DateTimeOffset.UtcNow) });
+        var gov = new GroupGovernanceState(manifest);
+        void AddMember(AuthorId id, string nodeName)
+        {
+            gov.MemberStates[id] = new ModerationAction(groupId, 1, 1, id, spkiB64, new NodeId(nodeName),
+                MemberStatus.Admitted, selfId, "ok", DateTimeOffset.UtcNow, "sig");
+        }
+        AddMember(selfId, "node-self");
+        AddMember(recipientId, "node-rec");
+        AddMember(relay1, "node-r1");
+        AddMember(relay2, "node-r2");
+        AddMember(relay3, "node-r3");
+        AddMember(relay4, "node-r4");
+
+        // Use Monday 14:00 local and Saturday 20:00 local
+        var weekday14 = new DateTimeOffset(2026, 11, 23, 14, 0, 0, TimeSpan.Zero).ToLocalTime();
+        var weekday03 = new DateTimeOffset(2026, 11, 23, 3, 0, 0, TimeSpan.Zero).ToLocalTime();
+        var weekend20 = new DateTimeOffset(2026, 11, 28, 20, 0, 0, TimeSpan.Zero).ToLocalTime();
+
+        var profiles = new Dictionary<AuthorId, PeerActivityProfile>
+        {
+            [recipientId] = new PeerActivityProfile(recipientId, new NodeId("node-rec")),
+            [relay1] = new PeerActivityProfile(relay1, new NodeId("node-r1")),
+            [relay2] = new PeerActivityProfile(relay2, new NodeId("node-r2")),
+            [relay3] = new PeerActivityProfile(relay3, new NodeId("node-r3")),
+            [relay4] = new PeerActivityProfile(relay4, new NodeId("node-r4"))
+        };
+
+        for (int i = 0; i < 5; i++)
+        {
+            PeerActivityTimetable.RecordObservation(profiles[recipientId], weekday14);
+            PeerActivityTimetable.RecordObservation(profiles[recipientId], weekend20);
+            PeerActivityTimetable.RecordObservation(profiles[relay1], weekday14);
+            PeerActivityTimetable.RecordObservation(profiles[relay1], weekend20);
+            PeerActivityTimetable.RecordObservation(profiles[relay2], weekday14);
+            PeerActivityTimetable.RecordObservation(profiles[relay3], weekend20);
+            PeerActivityTimetable.RecordObservation(profiles[relay4], weekday03);
+        }
+
+        var prophet = new Dictionary<AuthorId, double>
+        {
+            [relay1] = 0.85,
+            [relay2] = 0.75,
+            [relay3] = 0.65,
+            [relay4] = 0.10
+        };
+
+        IReadOnlyList<RelayCandidateScore> top3 = ProphetRoutingEngine.SelectTopRelays(
+            selfId, recipientId, new[] { gov }, profiles, prophet, weekday14, maxRelays: 3);
+
+        Assert(top3.Count == 3, $"Expected top 3 relays, got {top3.Count}.");
+        Assert(top3[0].AuthorId == relay1, "Relay1 (best weekday+weekend match) must rank first.");
+        Assert(!top3.Any(r => r.AuthorId == relay4), "Relay4 (mismatching 03h schedule) must be excluded from top 3.");
+    }
+
+    private static async Task TestDirectMessageCryptoAndDedupAsync()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), $"whispernet_dm_crypto_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var svcA = new AccountService(Path.Combine(tempRoot, "a"));
+            var svcB = new AccountService(Path.Combine(tempRoot, "b"));
+            AccountProfile profA = await svcA.CreateAccountAsync("Alice");
+            AccountProfile profB = await svcB.CreateAccountAsync("Bob");
+            using AccountSession sessA = await svcA.UnlockAccountAsync(profA.AuthorId);
+            using AccountSession sessB = await svcB.UnlockAccountAsync(profB.AuthorId);
+
+            byte[] secretAB = svcA.DerivePairSecret(sessA, Convert.FromBase64String(profB.PublicKeySpkiBase64));
+            byte[] secretBA = svcB.DerivePairSecret(sessB, Convert.FromBase64String(profA.PublicKeySpkiBase64));
+            Assert(secretAB.SequenceEqual(secretBA), "ECDH P-256 pair_secret must be symmetric.");
+
+            string tag1 = DirectMessagingService.ComputeBlindRoutingTagHex(secretAB, 100);
+            string tag2 = DirectMessagingService.ComputeBlindRoutingTagHex(secretBA, 100);
+            string tagNext = DirectMessagingService.ComputeBlindRoutingTagHex(secretAB, 101);
+            Assert(tag1 == tag2 && tag1.Length == 64, "Blind routing tag must match for the same epoch.");
+            Assert(tag1 != tagNext, "Blind routing tag must rotate across epochs.");
+
+            var repo = new SqliteDirectMessageRepository(WhispernetPaths.GetDirectMessagesDbPath(tempRoot));
+            await repo.InitializeAsync();
+            Guid uuid = Guid.NewGuid();
+            var rec = new DirectMessageRecord(uuid, profA.AuthorId, false, "Hello via QUIC+DTN", DirectMessageStatus.Delivered, DateTimeOffset.UtcNow);
+            bool firstInsert = await repo.TryInsertMessageAsync(rec);
+            bool secondInsert = await repo.TryInsertMessageAsync(rec);
+            Assert(firstInsert && !secondInsert, "SQLite direct_messages must deduplicate identical MessageUuid.");
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot))
+            {
+                Directory.Delete(tempRoot, recursive: true);
+            }
+        }
+    }
+
+    private static async Task TestLiveDirectMessagingAckAndDtnFallbackAsync()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), $"whispernet_dm_live_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var svcA = new AccountService(Path.Combine(tempRoot, "alice"));
+            var svcB = new AccountService(Path.Combine(tempRoot, "bob"));
+            var svcR = new AccountService(Path.Combine(tempRoot, "relay"));
+
+            AccountProfile profA = await svcA.CreateAccountAsync("Alice");
+            AccountProfile profB = await svcB.CreateAccountAsync("Bob");
+            AccountProfile profR = await svcR.CreateAccountAsync("RelayPeer");
+
+            using AccountSession sessA = await svcA.UnlockAccountAsync(profA.AuthorId);
+            using AccountSession sessB = await svcB.UnlockAccountAsync(profB.AuthorId);
+            using AccountSession sessR = await svcR.UnlockAccountAsync(profR.AuthorId);
+
+            using var tA = IrohEndpointAdapter.CreateAndBind(alpn: "/whispernet/dm-test/1", enableRelay: true, onlineTimeoutMs: 2500);
+            using var tB = IrohEndpointAdapter.CreateAndBind(alpn: "/whispernet/dm-test/1", enableRelay: true, onlineTimeoutMs: 2500);
+            using var tR = IrohEndpointAdapter.CreateAndBind(alpn: "/whispernet/dm-test/1", enableRelay: true, onlineTimeoutMs: 2500);
+
+            var meshA = new GroupMeshService(tA);
+            var meshB = new GroupMeshService(tB);
+            var meshR = new GroupMeshService(tR);
+
+            var repoA = new SqliteDirectMessageRepository(WhispernetPaths.GetDirectMessagesDbPath(Path.Combine(tempRoot, "alice")));
+            var repoB = new SqliteDirectMessageRepository(WhispernetPaths.GetDirectMessagesDbPath(Path.Combine(tempRoot, "bob")));
+            var repoR = new SqliteDirectMessageRepository(WhispernetPaths.GetDirectMessagesDbPath(Path.Combine(tempRoot, "relay")));
+            await repoA.InitializeAsync();
+            await repoB.InitializeAsync();
+            await repoR.InitializeAsync();
+
+            // Shared governed group so RelayPeer is a mutual friend in the same group
+            var groupId = GroupId.FromOwnerPublicKeySpki(Convert.FromBase64String(profA.PublicKeySpkiBase64));
+            var manifest = new GroupManifest(groupId, profA.PublicKeySpkiBase64, 1, "DmTestGroup", false, null, null, null, false,
+                new Dictionary<AuthorId, string> { [profA.AuthorId] = profA.PublicKeySpkiBase64 }, DateTimeOffset.UtcNow, "sig", 0, null,
+                new[] { new GroupChannel(ChannelId.DefaultGeneralFor(groupId), "general", DateTimeOffset.UtcNow) });
+            var gov = new GroupGovernanceState(manifest);
+            gov.MemberStates[profA.AuthorId] = new ModerationAction(groupId, 1, 1, profA.AuthorId, profA.PublicKeySpkiBase64, tA.SelfId, MemberStatus.Admitted, profA.AuthorId, "owner", DateTimeOffset.UtcNow, "sig");
+            gov.MemberStates[profB.AuthorId] = new ModerationAction(groupId, 1, 2, profB.AuthorId, profB.PublicKeySpkiBase64, tB.SelfId, MemberStatus.Admitted, profA.AuthorId, "ok", DateTimeOffset.UtcNow, "sig");
+            gov.MemberStates[profR.AuthorId] = new ModerationAction(groupId, 1, 3, profR.AuthorId, profR.PublicKeySpkiBase64, tR.SelfId, MemberStatus.Admitted, profA.AuthorId, "ok", DateTimeOffset.UtcNow, "sig");
+
+            using var dmA = new DirectMessagingService(svcA, sessA, tA, meshA, repoA, () => new[] { gov });
+            using var dmB = new DirectMessagingService(svcB, sessB, tB, meshB, repoB, () => new[] { gov });
+            using var dmR = new DirectMessagingService(svcR, sessR, tR, meshR, repoR, () => new[] { gov });
+
+            dmA.RegisterContactsFromGroup(gov);
+            dmB.RegisterContactsFromGroup(gov);
+            dmR.RegisterContactsFromGroup(gov);
+            dmA.RecordPeerActivity(profR.AuthorId, tR.SelfId);
+            dmA.RecordPeerActivity(profB.AuthorId, tB.SelfId);
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+            tA.StartAcceptLoop(meshA.HandleIncomingPayload, cts.Token);
+            tB.StartAcceptLoop(meshB.HandleIncomingPayload, cts.Token);
+            tR.StartAcceptLoop(meshR.HandleIncomingPayload, cts.Token);
+
+            // 1. Live direct QUIC stream + immediate ACK + typing indicator
+            var bobGotLive = new TaskCompletionSource<DirectMessageRecord>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var aliceGotAck = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var bobGotTyping = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            dmB.DirectMessageReceived += rec => bobGotLive.TrySetResult(rec);
+            dmB.TypingIndicatorReceived += t => { if (t.IsTyping) bobGotTyping.TrySetResult(true); };
+            Guid liveUuid = Guid.Empty;
+            dmA.MessageStatusChanged += (uuid, st, _) =>
+            {
+                if (uuid == liveUuid && st == DirectMessageStatus.Delivered)
+                {
+                    aliceGotAck.TrySetResult(true);
+                }
+            };
+
+            DirectMessageRecord liveRec = await dmA.SendDirectMessageAsync(profB.AuthorId, "Live QUIC 1-on-1 hello!", ct: cts.Token);
+            liveUuid = liveRec.MessageUuid;
+            DirectMessageRecord deliveredB = await bobGotLive.Task.WaitAsync(TimeSpan.FromSeconds(10), cts.Token);
+            await aliceGotAck.Task.WaitAsync(TimeSpan.FromSeconds(10), cts.Token);
+            Assert(deliveredB.MessageUuid == liveUuid && deliveredB.Content == "Live QUIC 1-on-1 hello!", "Bob must receive live 1-on-1 message.");
+
+            await dmA.SendTypingIndicatorAsync(profB.AuthorId, isTyping: true, cts.Token);
+            Assert(await bobGotTyping.Task.WaitAsync(TimeSpan.FromSeconds(5), cts.Token), "Bob must receive ephemeral typing indicator.");
+
+            // 2. Unreachable recipient -> Blind-tagged DTN bundle handed to RelayPeer -> QueuedViaRelay -> Bob pulls on reconnect
+            var offlinePeerId = new AuthorId(new string('f', 64));
+            using var offlineEcdsa = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+            string offlineSpkiB64 = Convert.ToBase64String(offlineEcdsa.ExportSubjectPublicKeyInfo());
+            // Use Bob's real SPKI with an unreachable NodeId so Bob can later pull & decrypt from RelayPeer!
+            var unreachableNode = new NodeId(new string('0', 64));
+            var relayStoredTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var queuedViaRelayTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            meshR.DtnBundleReceived += _ => relayStoredTcs.TrySetResult(true);
+            dmA.MessageStatusChanged += (_, st, _) =>
+            {
+                if (st == DirectMessageStatus.QueuedViaRelay)
+                {
+                    queuedViaRelayTcs.TrySetResult(true);
+                }
+            };
+
+            DirectMessageRecord queuedRec = await dmA.SendDirectMessageAsync(
+                profB.AuthorId,
+                "Offline DTN blind bundle!",
+                recipientNodeId: unreachableNode,
+                ct: cts.Token);
+            await queuedViaRelayTcs.Task.WaitAsync(TimeSpan.FromSeconds(15), cts.Token);
+            await relayStoredTcs.Task.WaitAsync(TimeSpan.FromSeconds(15), cts.Token);
+
+            var bobGotDtn = new TaskCompletionSource<DirectMessageRecord>(TaskCreationOptions.RunContinuationsAsynchronously);
+            dmB.DirectMessageReceived += rec =>
+            {
+                if (rec.MessageUuid == queuedRec.MessageUuid)
+                {
+                    bobGotDtn.TrySetResult(rec);
+                }
+            };
+
+            // Bob reconnects and queries RelayPeer with its blind tags
+            await dmB.QueryPeerForBlindTaggedBundlesAsync(tR.SelfId, DateTimeOffset.UtcNow);
+            DirectMessageRecord dtnDeliveredB = await bobGotDtn.Task.WaitAsync(TimeSpan.FromSeconds(10), cts.Token);
+            Assert(dtnDeliveredB.Content == "Offline DTN blind bundle!", "Bob must decrypt blind-tagged DTN bundle from RelayPeer.");
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot))
+            {
+                Directory.Delete(tempRoot, recursive: true);
+            }
+        }
+    }
+
+    private static async Task TestDaemonUnattendedBlindRelayAsync()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), $"whispernet_daemon_test_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            // 1. Start unattended WhispernetDaemonHost (0 accounts logged in)
+            string daemonDir = Path.Combine(tempRoot, "daemon");
+            await using var daemon = new WhispernetDaemonHost(daemonDir, "/whispernet/daemon-test/1");
+            await daemon.StartAsync();
+
+            // 2. Bob sends a blind-tagged DTN bundle for offline Arvo to the unattended daemon
+            var svcBob = new AccountService(Path.Combine(tempRoot, "bob"));
+            var svcArvo = new AccountService(Path.Combine(tempRoot, "arvo"));
+            AccountProfile profBob = await svcBob.CreateAccountAsync("Bob");
+            AccountProfile profArvo = await svcArvo.CreateAccountAsync("Arvo");
+            using AccountSession sessBob = await svcBob.UnlockAccountAsync(profBob.AuthorId);
+            using AccountSession sessArvo = await svcArvo.UnlockAccountAsync(profArvo.AuthorId);
+
+            using var tBob = IrohEndpointAdapter.CreateAndBind(alpn: "/whispernet/daemon-test/1", enableRelay: true, onlineTimeoutMs: 2500);
+            var meshBob = new GroupMeshService(tBob);
+            var repoBob = new SqliteDirectMessageRepository(WhispernetPaths.GetDirectMessagesDbPath(Path.Combine(tempRoot, "bob")));
+            await repoBob.InitializeAsync();
+
+            var groupId = GroupId.FromOwnerPublicKeySpki(Convert.FromBase64String(profBob.PublicKeySpkiBase64));
+            var manifest = new GroupManifest(groupId, profBob.PublicKeySpkiBase64, 1, "DaemonGroup", false, null, null, null, false,
+                new Dictionary<AuthorId, string> { [profBob.AuthorId] = profBob.PublicKeySpkiBase64 }, DateTimeOffset.UtcNow, "sig", 0, null,
+                new[] { new GroupChannel(ChannelId.DefaultGeneralFor(groupId), "general", DateTimeOffset.UtcNow) });
+            var gov = new GroupGovernanceState(manifest);
+            gov.MemberStates[profBob.AuthorId] = new ModerationAction(groupId, 1, 1, profBob.AuthorId, profBob.PublicKeySpkiBase64, tBob.SelfId, MemberStatus.Admitted, profBob.AuthorId, "owner", DateTimeOffset.UtcNow, "sig");
+            gov.MemberStates[profArvo.AuthorId] = new ModerationAction(groupId, 1, 2, profArvo.AuthorId, profArvo.PublicKeySpkiBase64, new NodeId(new string('0', 64)), MemberStatus.Admitted, profBob.AuthorId, "ok", DateTimeOffset.UtcNow, "sig");
+            var relayAuthor = new AuthorId(new string('d', 64));
+            gov.MemberStates[relayAuthor] = new ModerationAction(groupId, 1, 3, relayAuthor, profBob.PublicKeySpkiBase64, daemon.SelfId, MemberStatus.Admitted, profBob.AuthorId, "daemon", DateTimeOffset.UtcNow, "sig");
+
+            using var dmBob = new DirectMessagingService(svcBob, sessBob, tBob, meshBob, repoBob, () => new[] { gov });
+            dmBob.RegisterContactsFromGroup(gov);
+            dmBob.RecordPeerActivity(relayAuthor, daemon.SelfId);
+
+            var daemonStored = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            daemon.LogEmitted += log => { if (log.Contains("Stored blind DTN bundle", StringComparison.Ordinal)) daemonStored.TrySetResult(true); };
+
+            await dmBob.SendDirectMessageAsync(profArvo.AuthorId, "Unattended daemon relay message!");
+            await daemonStored.Task.WaitAsync(TimeSpan.FromSeconds(15));
+
+            // 3. Arvo logs in later and registers its rotating BlindTags with the unattended daemon
+            byte[] pairSecret = svcArvo.DerivePairSecret(sessArvo, Convert.FromBase64String(profBob.PublicKeySpkiBase64));
+            long epoch = dmBob.GetEpoch(DateTimeOffset.UtcNow);
+            string expectedTag = DirectMessagingService.ComputeBlindRoutingTagHex(pairSecret, epoch);
+
+            IReadOnlyList<byte[]> claimed = await daemon.RegisterWatchTagsAsync(
+                new RegisterWatchTagsRequest(profArvo.AuthorId, new[] { expectedTag }));
+
+            Assert(claimed.Count == 1, $"Expected daemon to return 1 matching blind-tagged bundle for Arvo, got {claimed.Count}.");
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot))
+            {
+                Directory.Delete(tempRoot, recursive: true);
+            }
+        }
+    }
+
+    private static void TestFriendGraphEngineProtocol()
+    {
+        using var aliceKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var bobKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        byte[] aliceSpki = aliceKey.ExportSubjectPublicKeyInfo();
+        byte[] bobSpki = bobKey.ExportSubjectPublicKeyInfo();
+        string aliceSpkiB64 = Convert.ToBase64String(aliceSpki);
+        string bobSpkiB64 = Convert.ToBase64String(bobSpki);
+        var aliceId = new AuthorId(Convert.ToHexStringLower(SHA256.HashData(aliceSpki)));
+        var bobId = new AuthorId(Convert.ToHexStringLower(SHA256.HashData(bobSpki)));
+
+        static bool VerifySig(ReadOnlySpan<byte> spki, ReadOnlySpan<byte> data, ReadOnlySpan<byte> sig)
+        {
+            using var ecdsa = ECDsa.Create();
+            ecdsa.ImportSubjectPublicKeyInfo(spki, out _);
+            return ecdsa.VerifyData(data, sig, HashAlgorithmName.SHA256);
+        }
+
+        var bobState = new FriendGraphState(bobId);
+        var reqUnsigned = new FriendRequestPacket(
+            Guid.NewGuid(), aliceId, bobId, aliceSpkiB64, "Alice", new NodeId("node-alice"), 1, DateTimeOffset.UtcNow, string.Empty);
+        var reqSigned = reqUnsigned with { SignatureBase64 = Convert.ToBase64String(aliceKey.SignData(reqUnsigned.BuildSignableBytes(), HashAlgorithmName.SHA256)) };
+
+        // Forged signature must fail
+        var forged = reqSigned with { SenderDisplayName = "Mallory" };
+        Assert(!FriendGraphEngine.TryApplyIncomingRequest(bobState, forged, VerifySig, out _, out _), "Forged friend request should be rejected.");
+
+        // Valid incoming request
+        Assert(FriendGraphEngine.TryApplyIncomingRequest(bobState, reqSigned, VerifySig, out bool autoAccepted, out string? err), $"Valid request failed: {err}");
+        Assert(!autoAccepted && bobState.GetStatus(aliceId) == FriendStatus.PendingIncoming, "Expected PendingIncoming.");
+
+        // Stale request with same/lower clock must fail
+        Assert(!FriendGraphEngine.TryApplyIncomingRequest(bobState, reqSigned, VerifySig, out _, out _), "Stale clock request should be rejected.");
+
+        // Accept on Alice's side via FriendResponsePacket
+        var aliceState = new FriendGraphState(aliceId);
+        aliceState.Entries[bobId] = new FriendEntry(bobId, bobSpkiB64, "Bob", new NodeId("node-bob"), FriendStatus.PendingOutgoing, 1, DateTimeOffset.UtcNow);
+        var respUnsigned = new FriendResponsePacket(
+            Guid.NewGuid(), bobId, aliceId, bobSpkiB64, "Bob", new NodeId("node-bob"), Accepted: true, LogicalClock: 2, DateTimeOffset.UtcNow, string.Empty);
+        var respSigned = respUnsigned with { SignatureBase64 = Convert.ToBase64String(bobKey.SignData(respUnsigned.BuildSignableBytes(), HashAlgorithmName.SHA256)) };
+        Assert(FriendGraphEngine.TryApplyIncomingResponse(aliceState, respSigned, VerifySig, out err), $"Valid accept response failed: {err}");
+        Assert(aliceState.IsFriend(bobId), "Alice should now have Bob as Accepted friend.");
+
+        // Remove on Alice's side via FriendRemovePacket from Bob
+        var remUnsigned = new FriendRemovePacket(Guid.NewGuid(), bobId, aliceId, bobSpkiB64, 3, DateTimeOffset.UtcNow, string.Empty);
+        var remSigned = remUnsigned with { SignatureBase64 = Convert.ToBase64String(bobKey.SignData(remUnsigned.BuildSignableBytes(), HashAlgorithmName.SHA256)) };
+        Assert(FriendGraphEngine.TryApplyIncomingRemove(aliceState, remSigned, VerifySig, out err), $"Valid remove failed: {err}");
+        Assert(!aliceState.IsFriend(bobId) && aliceState.GetStatus(bobId) == FriendStatus.Removed, "Expected Removed status.");
+
+        // Simultaneous mutual friend request -> autoAccepted
+        var mutualState = new FriendGraphState(bobId);
+        mutualState.Entries[aliceId] = new FriendEntry(aliceId, aliceSpkiB64, "Alice", null, FriendStatus.PendingOutgoing, 1, DateTimeOffset.UtcNow);
+        Assert(FriendGraphEngine.TryApplyIncomingRequest(mutualState, reqSigned, VerifySig, out bool mutualAccepted, out err), $"Mutual request failed: {err}");
+        Assert(mutualAccepted && mutualState.IsFriend(aliceId), "Simultaneous mutual request should auto-promote to Accepted.");
+    }
+
+    private static async Task TestFriendServiceVaultAndPolicyAsync()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), $"whispernet_friend_test_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var accountService = new AccountService(tempRoot);
+            AccountProfile profAlice = await accountService.CreateAccountAsync("Alice", null);
+            AccountProfile profBob = await accountService.CreateAccountAsync("Bob", null);
+            using AccountSession sessAlice = await accountService.UnlockAccountAsync(profAlice.AuthorId, null);
+            using AccountSession sessBob = await accountService.UnlockAccountAsync(profBob.AuthorId, null);
+
+            var aliceFriends = new FriendService(accountService);
+            var bobFriends = new FriendService(accountService);
+            await aliceFriends.LoadFromVaultAsync(sessAlice);
+            await bobFriends.LoadFromVaultAsync(sessBob);
+
+            string bobLink = bobFriends.CreateFriendLink(sessBob, new NodeId("node-bob"));
+            FriendInvitationData parsed = FriendService.ParseFriendLink(bobLink);
+            Assert(parsed.AuthorId == profBob.AuthorId && parsed.DisplayName == "Bob", "Friend link round-trip mismatch.");
+
+            // Alice sends request to Bob (local account on same root -> writes to [TEST-ONLY] test-loopback-friend-inbox)
+            FriendEntry outEntry = await aliceFriends.SendFriendRequestAsync(
+                parsed.AuthorId, parsed.PublicKeySpkiBase64, parsed.DisplayName, recipientNodeId: null);
+            Assert(outEntry.Status == FriendStatus.PendingOutgoing, "Expected PendingOutgoing on Alice.");
+
+            // Bob consumes the [TEST-ONLY] loopback inbox and sees Alice's incoming request
+            await bobFriends.ConsumeTestLoopbackInboxAsync();
+            Assert(bobFriends.GetIncomingRequests().Count == 1, "Expected 1 incoming request on Bob via loopback inbox.");
+
+            // Bob accepts
+            await bobFriends.AcceptFriendRequestAsync(profAlice.AuthorId);
+            Assert(bobFriends.IsFriend(profAlice.AuthorId), "Bob should have Alice as friend.");
+
+            // Test same-daemon DM loopback between Bob and Alice
+            var sameDaemonNode = new NodeId("same-daemon-node");
+            using var sharedTransport = new SameDaemonLoopbackTestTransport(sameDaemonNode);
+            var sharedMesh = new GroupMeshService(sharedTransport);
+            var bobDmRepo = new SqliteDirectMessageRepository(WhispernetPaths.GetDirectMessagesDbPath(tempRoot, profBob.AuthorId));
+            var aliceDmRepo = new SqliteDirectMessageRepository(WhispernetPaths.GetDirectMessagesDbPath(tempRoot, profAlice.AuthorId));
+            await bobDmRepo.InitializeAsync();
+            await aliceDmRepo.InitializeAsync();
+            using var bobDm = new DirectMessagingService(accountService, sessBob, sharedTransport, sharedMesh, bobDmRepo, () => Array.Empty<GroupGovernanceState>());
+            using var aliceDm = new DirectMessagingService(accountService, sessAlice, sharedTransport, sharedMesh, aliceDmRepo, () => Array.Empty<GroupGovernanceState>());
+
+            DirectMessageRecord? aliceGotDm = null;
+            aliceDm.DirectMessageReceived += rec => aliceGotDm = rec;
+
+            DirectMessageRecord sentDm = await bobDm.SendDirectMessageAsync(
+                profAlice.AuthorId,
+                "Hello Alice on same daemon!",
+                profAlice.PublicKeySpkiBase64,
+                sameDaemonNode);
+            Assert(sentDm.Status == DirectMessageStatus.Delivered, $"Expected Delivered via same-daemon loopback, got {sentDm.Status}.");
+
+            await aliceDm.ConsumeTestLoopbackInboxAsync();
+            Assert(aliceGotDm is not null && aliceGotDm.Content == "Hello Alice on same daemon!", "Alice should receive Bob's DM via same-daemon loopback.");
+
+            // Test DM policy toggle & vault persistence
+            Assert(bobFriends.IsAuthorAllowedForDm(new AuthorId("stranger")), "By default non-friends should be allowed for DMs.");
+            await bobFriends.SetRestrictDmsToFriendsAsync(true);
+            Assert(!bobFriends.IsAuthorAllowedForDm(new AuthorId("stranger")), "Non-friend should be blocked when RestrictDmsToFriends=true.");
+            Assert(bobFriends.IsAuthorAllowedForDm(profAlice.AuthorId), "Accepted friend should remain allowed.");
+
+            // Reload from vault and verify persistence
+            var bobReloaded = new FriendService(accountService);
+            await bobReloaded.LoadFromVaultAsync(sessBob);
+            Assert(bobReloaded.IsFriend(profAlice.AuthorId), "Accepted friend should persist in vault.");
+            Assert(bobReloaded.RestrictDmsToFriends, "RestrictDmsToFriends setting should persist in vault.");
+
+            // Remove friend
+            await bobReloaded.RemoveFriendAsync(profAlice.AuthorId);
+            Assert(!bobReloaded.IsFriend(profAlice.AuthorId), "Friend should be removed.");
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot))
+            {
+                Directory.Delete(tempRoot, recursive: true);
+            }
+        }
+    }
+
+    private sealed class SameDaemonLoopbackTestTransport : IMeshTransport
+    {
+        public SameDaemonLoopbackTestTransport(NodeId selfId) => SelfId = selfId;
+        public NodeId SelfId { get; }
+        public string SelfTicket => SelfId.Value;
+        public bool HasActiveConnection(NodeId target) => false;
+        public Task<bool> ConnectSmartAsync(NodeId target, string? cachedTicket = null, bool allowDhtLookup = true, CancellationToken ct = default) => Task.FromResult(false);
+        public Task SendUniAsync(NodeId target, byte[] payload, string? cachedTicket = null, bool allowDhtLookup = true, CancellationToken ct = default) => Task.CompletedTask;
+        public void CloseConnection(NodeId target) { }
+        public void StartAcceptLoop(Action<byte[]> onPayloadReceived, CancellationToken ct = default) { }
+        public void Dispose() { }
     }
 }

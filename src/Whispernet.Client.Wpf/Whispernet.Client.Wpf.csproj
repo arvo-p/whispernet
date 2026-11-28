@@ -11,6 +11,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Whispernet.App.Messaging\Whispernet.App.Messaging.csproj" />
+    <ProjectReference Include="..\Whispernet.Daemon.Client\Whispernet.Daemon.Client.csproj" />
+    <ProjectReference Include="..\Whispernet.Daemon.Contracts\Whispernet.Daemon.Contracts.csproj" />
   </ItemGroup>
 
 </Project>

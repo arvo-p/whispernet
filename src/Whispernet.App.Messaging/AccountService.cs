@@ -268,6 +268,12 @@ public sealed class AccountService : IAccountService{
         return ecdsa.VerifyData(data, signature, HashAlgorithmName.SHA256);
     }
 
+    public byte[] DerivePairSecret(AccountSession session, ReadOnlySpan<byte> peerPublicKeySpki)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        return session.DerivePairSecret(peerPublicKeySpki);
+    }
+
     private static string ValidateAndNormalizeUsername(string username)
     {
         if (string.IsNullOrWhiteSpace(username))
